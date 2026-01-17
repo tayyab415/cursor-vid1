@@ -59,37 +59,37 @@ export const suggestEdits = async (
 
   Task: Provide 3 distinct, high-quality edit suggestions.
   
-  CRITICAL REQUIREMENT for Suggestion 1 ("Social Media Teaser Hook"):
-  You MUST conceptually "copy-paste" a segment from later in the video to the very beginning.
-  
-  Logic for "Social Media Teaser Hook":
-  1. Identify a clip from the MIDDLE or END of the list (index > 0).
-  2. Create a NEW clip entry representing a 3-second highlight of that clip.
+  CRITICAL DATA REQUIREMENT:
+  The 'Clip' object now has a 'sourceStartTime' field. This represents the timestamp in the ORIGINAL raw footage.
+  - When trimming: 'sourceStartTime' + 'duration' determines the range.
+  - When splitting: The second part's 'sourceStartTime' must equal (Original 'sourceStartTime' + First Part 'duration').
+  - When copying (Hook): The new hook clip MUST have the SAME 'sourceStartTime' as the segment it was copied from.
+
+  Suggestion 1 ("Social Media Teaser Hook"):
+  1. Identify a clip from the MIDDLE or END.
+  2. Create a NEW clip (3s duration).
      - ID: "hook_from_[original_id]"
-     - Title: "⚡️ HOOK: [Original Title]"
-     - Duration: 3
-  3. Insert this NEW clip at index 0 (Start of array).
-  4. Preserve all original clips after it (do not delete them, just shift them down).
-  
-  Example Transformation:
-  Input: [{id: "c1"}, {id: "c2"}]
-  Output: [{id: "hook_c2", title: "⚡️ HOOK"}, {id: "c1"}, {id: "c2"}]
+     - Title: "⚡️ HOOK"
+     - sourceStartTime: [The sourceStartTime of the selected clip] + [Offset if grabbing from middle]
+  3. Insert at index 0.
+  4. Shift all other clips down (update 'startTime').
 
   Other Suggestions:
-  - "Quick Cut / Pacing Fix": Trim 10-20% off durations.
-  - "Narrative Reorder": Reverse the order or swap middle/end.
+  - "Quick Cut": Trim 20%. Update 'sourceStartTime' if trimming the start.
+  - "Reorder": Swap clips. Keep 'sourceStartTime' intact.
 
   Return a JSON object with a 'suggestions' array.
   For each suggestion, provide:
   - 'label', 'description', 'reasoning'
-  - 'clips': The complete new array of clips. Ensure 'startTime' is sequential starting from 0.`;
+  - 'clips': The COMPLETE new array.
+    - 'id', 'title', 'duration', 'startTime' (Timeline Position), 'sourceStartTime' (Original Video Position)`;
   
   try {
     const response = await ai.models.generateContent({
-        model: 'gemini-3-pro-preview', // Upgraded from Flash for better logic
+        model: 'gemini-3-pro-preview',
         contents: prompt,
         config: {
-          thinkingConfig: { thinkingBudget: 1024 }, // Enable thinking to plan the array manipulation
+          thinkingConfig: { thinkingBudget: 1024 },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -110,9 +110,10 @@ export const suggestEdits = async (
                           id: { type: Type.STRING },
                           title: { type: Type.STRING },
                           duration: { type: Type.NUMBER },
-                          startTime: { type: Type.NUMBER }
+                          startTime: { type: Type.NUMBER },
+                          sourceStartTime: { type: Type.NUMBER }
                         },
-                        required: ['id', 'title', 'duration', 'startTime']
+                        required: ['id', 'title', 'duration', 'startTime', 'sourceStartTime']
                       }
                     }
                   },
