@@ -4,7 +4,7 @@ export interface Clip {
   duration: number; // in seconds (Timeline duration)
   startTime: number; // Where it sits on the timeline
   sourceStartTime: number; // Where it starts in the original video file
-  type?: 'video' | 'image';
+  type?: 'video' | 'image' | 'audio';
   sourceUrl?: string;
   totalDuration?: number; // The full length of the source media file (if applicable)
   trackId: number; // 0 is bottom, higher numbers are stacked on top
@@ -15,6 +15,7 @@ export interface Clip {
     rotation: number; // degrees
   };
   speed?: number; // Playback speed multiplier (default 1)
+  volume?: number; // Audio volume 0-1 (default 1)
 }
 
 export interface AnalysisResult {
