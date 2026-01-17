@@ -1,15 +1,17 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Timeline } from './components/Timeline';
+import { CanvasControls } from './components/CanvasControls';
 import { Clip, ChatMessage, Suggestion } from './types';
 import { analyzeVideoFrames, suggestEdits } from './services/gemini';
 import { extractFramesFromVideo } from './utils/videoUtils';
-import { Video, Wand2, Play, Pause, Loader2, Upload, MessageSquare, RotateCcw, RotateCw, Sparkles, ArrowRight, Scissors, CheckCircle2 } from 'lucide-react';
+import { Video, Wand2, Play, Pause, Loader2, Upload, MessageSquare, RotateCcw, RotateCw, Sparkles, ArrowRight, Scissors, Maximize2, Gauge, ChevronUp, ChevronRight, ChevronLeft, Download } from 'lucide-react';
+import * as Mp4Muxer from 'mp4-muxer';
 
-// Initialize with sourceStartTime (assuming 0 for initial generic clips for demo purposes)
+// Initialize with defaults
 const INITIAL_CLIPS: Clip[] = [
-  { id: 'c1', title: 'Intro Scene', duration: 5, startTime: 0, sourceStartTime: 0, type: 'video', totalDuration: 60 },
-  { id: 'c2', title: 'Main Action', duration: 8, startTime: 5, sourceStartTime: 5, type: 'video', totalDuration: 60 },
-  { id: 'c3', title: 'Outro', duration: 4, startTime: 13, sourceStartTime: 13, type: 'video', totalDuration: 60 },
+  { id: 'c1', title: 'Intro Scene', duration: 5, startTime: 0, sourceStartTime: 0, type: 'video', totalDuration: 60, trackId: 1, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1 },
+  { id: 'c2', title: 'Main Action', duration: 8, startTime: 5, sourceStartTime: 5, type: 'video', totalDuration: 60, trackId: 1, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1 },
+  { id: 'c3', title: 'Outro', duration: 4, startTime: 13, sourceStartTime: 13, type: 'video', totalDuration: 60, trackId: 1, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1 },
 ];
 
 interface HistoryState {
@@ -18,11 +20,8 @@ interface HistoryState {
   future: Clip[][];
 }
 
-// Simple Markdown Formatter
 const MarkdownText: React.FC<{ text: string }> = ({ text }) => {
-  // Split by bold syntax (**text**)
   const parts = text.split(/(\*\*.*?\*\*)/g);
-  
   return (
     <span className="leading-relaxed">
       {parts.map((part, i) => {
@@ -36,7 +35,8 @@ const MarkdownText: React.FC<{ text: string }> = ({ text }) => {
 };
 
 export default function App() {
-  // History State Management
+  const [tracks, setTracks] = useState<number[]>([0, 1, 2]);
+
   const [history, setHistory] = useState<HistoryState>({
     past: [],
     present: INITIAL_CLIPS,
@@ -46,109 +46,445 @@ export default function App() {
   const clips = history.present;
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [hasAnalyzed, setHasAnalyzed] = useState(false);
+  const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+  const [isCustomSpeed, setIsCustomSpeed] = useState(false);
+  const [customSpeedText, setCustomSpeedText] = useState('');
 
   const [videoFile, setVideoFile] = useState<File | null>(null);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null); // Main Source
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([
     { role: 'model', text: 'Hello! I am your AI assistant. Upload a video and I can analyze its content, mood, and key events for you.' }
   ]);
   const [inputText, setInputText] = useState('');
   
-  // PLAYBACK STATE
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0); // TIMELINE Time
+  const [currentTime, setCurrentTime] = useState(0); 
   
-  // Active Clip State for rendering correct media
-  const [activeClip, setActiveClip] = useState<Clip | null>(null);
+  // Export State
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null); // For canvas dimensions
+  
+  // Refs for video elements to sync
+  const videoRefs = useRef<{[key: string]: HTMLVideoElement | null}>({});
 
-  // Auto-scroll chat
+  // Use a ref for currentTime to access it in the animation loop without restarting the effect
+  const currentTimeRef = useRef(currentTime);
+  useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Determine active clip based on time
-  useEffect(() => {
-     const clip = clips.find(c => currentTime >= c.startTime && currentTime < c.startTime + c.duration);
-     setActiveClip(clip || null);
-  }, [currentTime, clips]);
-
   // --- VIRTUAL PLAYER ENGINE ---
   useEffect(() => {
+    if (!isPlaying) return;
+
     let animationFrameId: number;
     let lastTimestamp: number;
 
     const loop = (timestamp: number) => {
-        if (!isPlaying) return;
-        
         if (!lastTimestamp) lastTimestamp = timestamp;
         const delta = (timestamp - lastTimestamp) / 1000;
         lastTimestamp = timestamp;
 
+        let masterTimeDelta = delta;
+        let syncedToMaster = false;
+        let masterClipId: string | null = null;
+
+        const currentT = currentTimeRef.current;
+        
+        // 1. Identify "Master" Video Candidate
+        const activeVideoClip = clips.find(c =>
+            c.type === 'video' &&
+            currentT >= c.startTime &&
+            currentT < c.startTime + c.duration
+        );
+
+        if (activeVideoClip) {
+             const el = videoRefs.current[activeVideoClip.id];
+             const speed = activeVideoClip.speed || 1;
+             
+             if (el && !el.paused && !el.seeking && el.readyState > 2) {
+                 const timeInClip = el.currentTime - activeVideoClip.sourceStartTime;
+                 const calculatedTimelineTime = activeVideoClip.startTime + (timeInClip / speed);
+
+                 const syncTolerance = Math.max(0.5, 0.2 * speed);
+
+                 if (Math.abs(calculatedTimelineTime - currentT) < syncTolerance) {
+                     masterTimeDelta = calculatedTimelineTime - currentT;
+                     syncedToMaster = true;
+                     masterClipId = activeVideoClip.id;
+                 }
+             }
+        }
+
+        // 2. Advance Timeline
         setCurrentTime(prevTime => {
-            const nextTime = prevTime + delta;
+            let nextTime;
             
-            // 1. Find which clip we are currently inside
-            const activeClip = clips.find(c => nextTime >= c.startTime && nextTime < c.startTime + c.duration);
+            if (syncedToMaster) {
+                nextTime = prevTime + masterTimeDelta;
+            } else {
+                nextTime = prevTime + delta;
+            }
             
-            if (activeClip) {
-                // If it's a video type, we need to sync the video element
-                if (activeClip.type !== 'image' && videoRef.current) {
-                    const offsetInClip = nextTime - activeClip.startTime;
-                    const targetSourceTime = activeClip.sourceStartTime + offsetInClip;
-                    
-                    // Only try to seek if the video source is loaded and duration is valid
-                    if (!isNaN(videoRef.current.duration)) {
-                         if (Math.abs(videoRef.current.currentTime - targetSourceTime) > 0.2) {
-                            videoRef.current.currentTime = targetSourceTime;
-                        }
-                        if (videoRef.current.paused) {
-                            videoRef.current.play().catch(() => {});
-                        }
+            // 3. Sync Secondary Videos
+            const visibleClips = clips.filter(c => nextTime >= c.startTime && nextTime < c.startTime + c.duration);
+            
+            visibleClips.forEach(clip => {
+                if (clip.type === 'video' && videoRefs.current[clip.id]) {
+                    const el = videoRefs.current[clip.id];
+                    if (el) {
+                         const speed = clip.speed || 1;
+                         
+                         if (Math.abs(el.playbackRate - speed) > 0.01) {
+                             el.playbackRate = speed;
+                         }
+
+                         if (el.paused) {
+                             el.play().catch(() => {});
+                         }
+
+                         const isMaster = syncedToMaster && masterClipId === clip.id;
+                         
+                         if (!isMaster) {
+                             const offsetInClip = nextTime - clip.startTime;
+                             const targetSourceTime = clip.sourceStartTime + (offsetInClip * speed);
+                             const drift = el.currentTime - targetSourceTime;
+
+                             let tolerance = 0.3;
+                             if (speed > 2) tolerance = 2.0; 
+                             if (speed > 4) tolerance = 4.0;
+
+                             if (Math.abs(drift) > tolerance) {
+                                 if (el.readyState >= 1) {
+                                     el.currentTime = targetSourceTime;
+                                 }
+                             }
+                         }
                     }
                 }
-            } else {
-                // GAP DETECTION or END
-                const nextClip = clips.find(c => c.startTime > nextTime);
-                if (nextClip) {
-                    // Skip to next clip
-                    return nextClip.startTime; 
-                } else {
-                    // End of timeline
-                    setIsPlaying(false);
-                    return prevTime;
-                }
-            }
+            });
 
+            // End Check
+            const maxDuration = clips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0);
+            if (nextTime > maxDuration) {
+                setIsPlaying(false);
+                return prevTime; 
+            }
             return nextTime;
         });
 
         animationFrameId = requestAnimationFrame(loop);
     };
 
-    if (isPlaying) {
-        animationFrameId = requestAnimationFrame(loop);
-    } else {
-        // Ensure video pauses when app state is paused
-        if (videoRef.current) {
-            videoRef.current.pause();
-        }
-    }
-
+    animationFrameId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animationFrameId);
   }, [isPlaying, clips]);
 
+  // --- STATIC SYNC (PAUSED STATE) ---
+  useEffect(() => {
+      if (isPlaying || isExporting) return; // Don't fight export logic
 
-  // --- Undo / Redo Logic ---
+      const visibleClips = clips.filter(c => currentTime >= c.startTime && currentTime < c.startTime + c.duration);
+      visibleClips.forEach(clip => {
+           if (clip.type === 'video' && videoRefs.current[clip.id]) {
+              const el = videoRefs.current[clip.id];
+              if (el) {
+                  el.pause();
+                  const speed = clip.speed || 1;
+                  const offsetInClip = currentTime - clip.startTime;
+                  const targetTime = clip.sourceStartTime + (offsetInClip * speed);
+                  
+                  if (Math.abs(el.currentTime - targetTime) > 0.05) {
+                      el.currentTime = targetTime;
+                  }
+              }
+           }
+      });
+  }, [isPlaying, isExporting, currentTime, clips]);
+
+  const handleExport = async () => {
+      if (isExporting) return;
+      setIsPlaying(false);
+      setIsExporting(true);
+      setExportProgress(0);
+
+      if (typeof VideoEncoder === 'undefined') {
+          alert("Your browser does not support VideoEncoder.");
+          setIsExporting(false);
+          return;
+      }
+
+      let videoEncoder: VideoEncoder | null = null;
+      let muxer: any = null;
+      const mediaCache: Record<string, HTMLVideoElement | HTMLImageElement> = {};
+
+      try {
+          const width = 1280;
+          const height = 720;
+          const fps = 30;
+          const bitRate = 4_000_000;
+
+          muxer = new Mp4Muxer.Muxer({
+              target: new Mp4Muxer.ArrayBufferTarget(),
+              video: { codec: 'avc', width, height },
+              fastStart: 'in-memory'
+          });
+
+          let encoderError: Error | null = null;
+          videoEncoder = new VideoEncoder({
+              output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+              error: (e) => {
+                  console.error("VideoEncoder Error:", e);
+                  encoderError = new Error(e.message || "Encoding failed");
+              }
+          });
+
+          const configsToCheck = [
+              { codec: 'avc1.42001f', width, height, bitrate: bitRate, framerate: fps },
+              { codec: 'avc1.4d002a', width, height, bitrate: bitRate, framerate: fps },
+              { codec: 'avc1.64001f', width, height, bitrate: bitRate, framerate: fps },
+          ];
+
+          let selectedConfig = null;
+          for (const config of configsToCheck) {
+              try {
+                  const support = await VideoEncoder.isConfigSupported(config);
+                  if (support.supported) {
+                      selectedConfig = config;
+                      break;
+                  }
+              } catch (e) {}
+          }
+
+          if (!selectedConfig) throw new Error("No supported AVC codec found.");
+          videoEncoder.configure(selectedConfig);
+
+          // Create canvas without 'desynchronized' to avoid potential readback issues
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d', { alpha: false });
+          if (!ctx) throw new Error("Could not create canvas context");
+
+          const totalDuration = clips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0);
+          const totalFrames = Math.ceil(totalDuration * fps);
+          const frameDuration = 1 / fps;
+
+          // Helper to get media off-screen (avoiding React refs/DOM issues)
+          const getMedia = async (url: string, type: 'video' | 'image') => {
+              if (mediaCache[url]) return mediaCache[url];
+
+              return new Promise<HTMLVideoElement | HTMLImageElement>((resolve, reject) => {
+                  if (type === 'video') {
+                      const v = document.createElement('video');
+                      // Only set crossOrigin if NOT a blob to avoid "CORS not supported" for opaque blobs
+                      if (!url.startsWith('blob:') && !url.startsWith('data:')) {
+                           v.crossOrigin = "anonymous";
+                      }
+                      v.muted = true;
+                      v.playsInline = true;
+                      v.autoplay = false;
+                      v.src = url;
+                      v.onloadedmetadata = () => resolve(v);
+                      v.onerror = () => reject(new Error(`Failed to load video ${url}`));
+                  } else {
+                      const img = new Image();
+                      if (!url.startsWith('blob:') && !url.startsWith('data:')) {
+                          img.crossOrigin = "anonymous";
+                      }
+                      img.onload = () => resolve(img);
+                      img.onerror = () => reject(new Error(`Failed to load image ${url}`));
+                      img.src = url;
+                  }
+              }).then(el => {
+                  mediaCache[url] = el;
+                  return el;
+              });
+          };
+
+          for (let i = 0; i < totalFrames; i++) {
+              if (encoderError) throw encoderError;
+              const t = i * frameDuration;
+              setExportProgress(Math.round((i / totalFrames) * 100));
+
+              ctx.fillStyle = '#000000';
+              ctx.fillRect(0, 0, width, height);
+
+              const activeClips = clips
+                  .filter(c => t >= c.startTime && t < c.startTime + c.duration)
+                  .sort((a, b) => a.trackId - b.trackId);
+
+              for (const clip of activeClips) {
+                  const sourceUrl = clip.sourceUrl || videoUrl;
+                  if (!sourceUrl) continue;
+
+                  const mediaEl = await getMedia(sourceUrl, clip.type || 'video');
+                  const offsetInClip = t - clip.startTime;
+                  const speed = clip.speed || 1;
+                  const sourceTime = clip.sourceStartTime + (offsetInClip * speed);
+
+                  if (mediaEl instanceof HTMLVideoElement) {
+                      mediaEl.currentTime = sourceTime;
+                      // Wait for seek if needed
+                      if (Math.abs(mediaEl.currentTime - sourceTime) > 0.1 || mediaEl.readyState < 2) {
+                          await new Promise<void>(resolve => {
+                              const onSeeked = () => {
+                                  mediaEl.removeEventListener('seeked', onSeeked);
+                                  resolve();
+                              };
+                              mediaEl.addEventListener('seeked', onSeeked);
+                              // Safety timeout
+                              setTimeout(() => {
+                                  mediaEl.removeEventListener('seeked', onSeeked);
+                                  resolve();
+                              }, 1000);
+                          });
+                      }
+                  }
+                  
+                  drawClipToCanvas(ctx, clip, mediaEl, width, height);
+              }
+
+              // Try/Catch specific to frame creation to catch "Tainted Canvas"
+              try {
+                  const frame = new VideoFrame(canvas, { timestamp: i * 1000000 / fps });
+                  videoEncoder.encode(frame, { keyFrame: i % (fps * 2) === 0 });
+                  frame.close();
+              } catch (frameErr: any) {
+                  console.error("Frame Error:", frameErr);
+                  // If it's a SecurityError, the canvas is tainted.
+                  if (frameErr.name === 'SecurityError') {
+                      throw new Error("Canvas Tainted: A media source (video/image) does not support CORS. Cannot export.");
+                  }
+                  throw frameErr;
+              }
+          }
+
+          await videoEncoder.flush();
+          muxer.finalize();
+
+          const { buffer } = muxer.target;
+          if (buffer.byteLength === 0) throw new Error("Output video is empty");
+          
+          const blob = new Blob([buffer], { type: 'video/mp4' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `cursor_video_${Date.now()}.mp4`;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+      } catch (err: any) {
+          console.error("Export Error:", err);
+          alert(`Export failed: ${err.message || "Unknown error"}`);
+      } finally {
+          if (videoEncoder && videoEncoder.state !== "closed") {
+              try { videoEncoder.close(); } catch(e) {}
+          }
+          setIsExporting(false);
+          setExportProgress(0);
+          setCurrentTime(0);
+      }
+  };
+
+  const drawClipToCanvas = (ctx: CanvasRenderingContext2D, clip: Clip, source: CanvasImageSource, containerW: number, containerH: number) => {
+      const transform = clip.transform || { x: 0, y: 0, scale: 1, rotation: 0 };
+      
+      ctx.save();
+      ctx.translate(containerW / 2, containerH / 2);
+      ctx.translate(transform.x * containerW, transform.y * containerH);
+      ctx.scale(transform.scale, transform.scale);
+      ctx.rotate((transform.rotation * Math.PI) / 180);
+
+      let srcW = 0, srcH = 0;
+      if (source instanceof HTMLVideoElement) {
+          srcW = source.videoWidth;
+          srcH = source.videoHeight;
+      } else if (source instanceof HTMLImageElement) {
+          srcW = source.naturalWidth;
+          srcH = source.naturalHeight;
+      }
+
+      if (srcW && srcH) {
+          const aspectSrc = srcW / srcH;
+          const aspectDest = containerW / containerH;
+          
+          let drawW, drawH;
+          if (aspectSrc > aspectDest) {
+              drawW = containerW;
+              drawH = containerW / aspectSrc;
+          } else {
+              drawH = containerH;
+              drawW = containerH * aspectSrc;
+          }
+          ctx.drawImage(source, -drawW/2, -drawH/2, drawW, drawH);
+      }
+      ctx.restore();
+  };
+
   const setClipsWithHistory = (newClips: Clip[]) => {
     setHistory(curr => ({
       past: [...curr.past, curr.present],
       present: newClips,
       future: []
     }));
+  };
+
+  const handleUpdateClipTransform = (id: string, newTransform: NonNullable<Clip['transform']>) => {
+      setHistory(curr => {
+          const index = curr.present.findIndex(c => c.id === id);
+          if (index === -1) return curr;
+          
+          const newClips = [...curr.present];
+          newClips[index] = { ...newClips[index], transform: newTransform };
+          
+          return {
+              ...curr,
+              present: newClips
+          };
+      });
+  };
+
+  const handleClipSpeed = (id: string, newSpeed: number) => {
+      setHistory(curr => {
+        const clipIndex = curr.present.findIndex(c => c.id === id);
+        if (clipIndex === -1) return curr;
+
+        const clip = curr.present[clipIndex];
+        const oldSpeed = clip.speed || 1;
+        const currentSourceDuration = clip.duration * oldSpeed;
+        const newDuration = currentSourceDuration / newSpeed;
+        const updatedClip = { ...clip, speed: newSpeed, duration: newDuration };
+        
+        const newClips = [...curr.present];
+        newClips[clipIndex] = updatedClip;
+
+        // Magnetize
+        const trackClips = newClips.filter(c => c.trackId === clip.trackId);
+        trackClips.sort((a, b) => a.startTime - b.startTime);
+        
+        let accumulated = 0;
+        const normalizedTrack = trackClips.map(c => {
+            const n = { ...c, startTime: accumulated };
+            accumulated += c.duration;
+            return n;
+        });
+
+        const otherClips = newClips.filter(c => c.trackId !== clip.trackId);
+        return {
+            past: [...curr.past, curr.present],
+            present: [...otherClips, ...normalizedTrack],
+            future: []
+        };
+      });
+      setShowSpeedMenu(false);
+      setIsCustomSpeed(false);
   };
 
   const handleUndo = useCallback(() => {
@@ -180,21 +516,39 @@ export default function App() {
   const canUndo = history.past.length > 0;
   const canRedo = history.future.length > 0;
 
-  // --- Actions ---
+  const handleAddTrack = (position: 'top' | 'bottom') => {
+      let nextId = 0;
+      if (position === 'top') {
+          nextId = tracks.length > 0 ? Math.max(...tracks) + 1 : 0;
+      } else {
+          nextId = tracks.length > 0 ? Math.min(...tracks) - 1 : 0;
+      }
+      const newTracks = [...tracks, nextId].sort((a, b) => a - b);
+      setTracks(newTracks);
+  };
 
   const handleDeleteClip = useCallback((id: string) => {
     setHistory(curr => {
+        const clipToDelete = curr.present.find(c => c.id === id);
+        if (!clipToDelete) return curr;
+        
         const remainingClips = curr.present.filter(c => c.id !== id);
-        // Magnetic Timeline
+        const trackClips = remainingClips.filter(c => c.trackId === clipToDelete.trackId);
+        trackClips.sort((a, b) => a.startTime - b.startTime);
+        
         let accumulatedTime = 0;
-        const normalizedClips = remainingClips.map(clip => {
+        const normalizedTrackClips = trackClips.map(clip => {
             const updated = { ...clip, startTime: accumulatedTime };
             accumulatedTime += clip.duration;
             return updated;
         });
+
+        const otherClips = remainingClips.filter(c => c.trackId !== clipToDelete.trackId);
+        const finalClips = [...otherClips, ...normalizedTrackClips];
+
         return {
             past: [...curr.past, curr.present],
-            present: normalizedClips,
+            present: finalClips,
             future: []
         };
     });
@@ -202,38 +556,48 @@ export default function App() {
   }, [selectedClipId]);
 
   const handleSplitClip = () => {
-      const active = clips.find(c => currentTime >= c.startTime && currentTime < c.startTime + c.duration);
-      if (!active) return;
-      if (active.type === 'image') {
+      let targetClip: Clip | undefined;
+      const visibleClips = clips.filter(c => currentTime >= c.startTime && currentTime < c.startTime + c.duration);
+      
+      if (selectedClipId) {
+          targetClip = visibleClips.find(c => c.id === selectedClipId);
+      }
+      if (!targetClip) {
+           targetClip = visibleClips.sort((a, b) => b.trackId - a.trackId)[0];
+      }
+
+      if (!targetClip) return;
+      if (targetClip.type === 'image') {
           setMessages(prev => [...prev, { role: 'system', text: `Cannot split static images.` }]);
           return;
       }
 
-      const offset = currentTime - active.startTime;
-      if (offset < 0.5 || offset > active.duration - 0.5) return;
+      const offset = currentTime - targetClip.startTime;
+      if (offset < 0.5 || offset > targetClip.duration - 0.5) return;
 
       const clipA: Clip = {
-          ...active,
+          ...targetClip,
           id: crypto.randomUUID(),
           duration: offset
       };
+      const speed = targetClip.speed || 1;
+      const sourceAdvance = offset * speed;
 
       const clipB: Clip = {
-          ...active,
+          ...targetClip,
           id: crypto.randomUUID(),
           startTime: currentTime,
-          duration: active.duration - offset,
-          sourceStartTime: active.sourceStartTime + offset,
-          title: active.title + " (Part 2)"
+          duration: targetClip.duration - offset,
+          sourceStartTime: targetClip.sourceStartTime + sourceAdvance,
+          title: targetClip.title + " (Part 2)"
       };
 
-      const index = clips.findIndex(c => c.id === active.id);
+      const index = clips.findIndex(c => c.id === targetClip!.id);
       const newClips = [...clips];
       newClips.splice(index, 1, clipA, clipB);
 
       setClipsWithHistory(newClips);
-      // Clean System Message
-      setMessages(prev => [...prev, { role: 'system', text: `✂️ Split "${active.title}" at ${offset.toFixed(1)}s` }]);
+      setMessages(prev => [...prev, { role: 'system', text: `✂️ Split "${targetClip!.title}"` }]);
   };
 
   const handleClipResize = (id: string, newDuration: number, trimMode: 'start' | 'end', commit: boolean) => {
@@ -242,43 +606,31 @@ export default function App() {
           if (clipIndex === -1) return curr;
 
           const clip = curr.present[clipIndex];
+          const speed = clip.speed || 1;
           let updatedClip = { ...clip };
 
           if (trimMode === 'end') {
-              // Standard duration update
               updatedClip.duration = Math.max(0.5, newDuration);
-              // Limit by source total duration
               if (clip.type === 'video' && clip.totalDuration) {
-                  const maxDur = clip.totalDuration - clip.sourceStartTime;
-                  updatedClip.duration = Math.min(updatedClip.duration, maxDur);
+                  const remainingSourceDuration = clip.totalDuration - clip.sourceStartTime;
+                  const maxTimelineDuration = remainingSourceDuration / speed;
+                  updatedClip.duration = Math.min(updatedClip.duration, maxTimelineDuration);
               }
           } else {
-              // Trimming start
               const durationDelta = newDuration - clip.duration;
-              // If dragging left (duration increases), delta > 0. Start time should decrease.
-              // If dragging right (duration decreases), delta < 0. Start time should increase.
-              
-              let newSourceStart = clip.sourceStartTime - durationDelta;
+              const sourceDelta = durationDelta * speed;
+              let newSourceStart = clip.sourceStartTime - sourceDelta;
               let finalDuration = newDuration;
 
-              // Constraint 1: Can't start before 0
               if (newSourceStart < 0) {
                   newSourceStart = 0;
-                  finalDuration = clip.duration + clip.sourceStartTime;
+                  finalDuration = (clip.sourceStartTime / speed) + clip.duration;
               }
-
-              // Constraint 2: Can't shrink below 0.5s
               if (finalDuration < 0.5) {
                   finalDuration = 0.5;
-                  newSourceStart = clip.sourceStartTime + (clip.duration - 0.5);
+                  newSourceStart = clip.sourceStartTime + ((clip.duration - 0.5) * speed);
               }
               
-              // Constraint 3 (Video): Can't start after end of video (unlikely in this interaction model but good safety)
-              if (clip.type === 'video' && clip.totalDuration && newSourceStart >= clip.totalDuration) {
-                   // Clamp
-                   // ... implementation complex for this edge case, skipping for demo simplicity
-              }
-
               if (clip.type === 'video') {
                  updatedClip.sourceStartTime = newSourceStart;
               }
@@ -288,68 +640,106 @@ export default function App() {
           const newClips = [...curr.present];
           newClips[clipIndex] = updatedClip;
 
-          // Re-magnetize timeline
+          const trackClips = newClips.filter(c => c.trackId === clip.trackId);
+          trackClips.sort((a, b) => a.startTime - b.startTime);
+
           let accumulated = 0;
-          const normalized = newClips.map(c => {
+          const normalizedTrack = trackClips.map(c => {
               const n = { ...c, startTime: accumulated };
               accumulated += c.duration;
               return n;
           });
+          
+          const otherClips = newClips.filter(c => c.trackId !== clip.trackId);
+          const finalClips = [...otherClips, ...normalizedTrack];
 
-          // If not committing (dragging), just update present without history
           if (!commit) {
-              return { ...curr, present: normalized };
+              return { ...curr, present: finalClips };
           }
           
-          // If committing, push to history
           return {
               past: [...curr.past, curr.present],
-              present: normalized,
+              present: finalClips,
               future: []
           };
       });
   };
 
-  const handleClipReorder = (sourceId: string, targetId: string) => {
-      const sourceIndex = clips.findIndex(c => c.id === sourceId);
-      const targetIndex = clips.findIndex(c => c.id === targetId);
+  const handleClipReorder = (sourceId: string, targetId: string | null, targetTrackId: number) => {
+      const sourceClip = clips.find(c => c.id === sourceId);
+      if (!sourceClip) return;
 
-      if (sourceIndex === -1 || targetIndex === -1 || sourceIndex === targetIndex) return;
+      const sourceTrackId = sourceClip.trackId;
+      const remaining = clips.filter(c => c.id !== sourceId);
+      const updatedSourceClip = { ...sourceClip, trackId: targetTrackId };
 
-      const newClips = [...clips];
-      const [movedClip] = newClips.splice(sourceIndex, 1);
-      newClips.splice(targetIndex, 0, movedClip);
+      const targetTrackClips = remaining.filter(c => c.trackId === targetTrackId);
+      targetTrackClips.sort((a, b) => a.startTime - b.startTime);
 
-      // Re-magnetize
-      let accumulated = 0;
-      const normalized = newClips.map(c => {
-          const n = { ...c, startTime: accumulated };
-          accumulated += c.duration;
-          return n;
+      let newTargetOrder = [];
+      if (targetId) {
+          const targetIndex = targetTrackClips.findIndex(c => c.id === targetId);
+          if (targetIndex !== -1) {
+              targetTrackClips.splice(targetIndex, 0, updatedSourceClip);
+              newTargetOrder = targetTrackClips;
+          } else {
+             newTargetOrder = [...targetTrackClips, updatedSourceClip]; 
+          }
+      } else {
+          newTargetOrder = [...targetTrackClips, updatedSourceClip];
+      }
+
+      let tAcc = 0;
+      const finalTargetTrack = newTargetOrder.map(c => {
+          const u = { ...c, startTime: tAcc };
+          tAcc += c.duration;
+          return u;
       });
 
-      setClipsWithHistory(normalized);
+      let finalSourceTrack: Clip[] = [];
+      if (sourceTrackId !== targetTrackId) {
+          const sourceTrackClips = remaining.filter(c => c.trackId === sourceTrackId);
+          sourceTrackClips.sort((a, b) => a.startTime - b.startTime);
+          let sAcc = 0;
+          finalSourceTrack = sourceTrackClips.map(c => {
+              const u = { ...c, startTime: sAcc };
+              sAcc += c.duration;
+              return u;
+          });
+      }
+
+      const untouchedClips = remaining.filter(c => c.trackId !== targetTrackId && c.trackId !== sourceTrackId);
+      const result = [...untouchedClips, ...finalTargetTrack, ...finalSourceTrack];
+
+      setClipsWithHistory(result);
   };
 
   const handleApplySuggestion = (suggestion: Suggestion) => {
     let t = 0;
     const cleanClips = suggestion.clips.map(c => {
-        const clip = { ...c, startTime: t };
+        const clip = { ...c, startTime: t, trackId: 1, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1 };
         t += c.duration;
         return clip;
     });
-
     setClipsWithHistory(cleanClips);
-    // Clean System Message
-    setMessages(prev => [...prev, { role: 'system', text: `✨ Applied suggestion: ${suggestion.label}` }]);
+    setMessages(prev => [...prev, { role: 'system', text: `✨ Applied suggestion` }]);
     setSelectedClipId(null);
   };
 
   const handleSelectClip = (id: string) => {
       setSelectedClipId(id);
+      setShowSpeedMenu(false);
+      setIsCustomSpeed(false);
   };
 
-  // Keyboard Shortcuts
+  const handleCanvasClick = (e: React.MouseEvent) => {
+      if (e.target === containerRef.current || e.target === e.currentTarget) {
+          setSelectedClipId(null);
+          setShowSpeedMenu(false);
+          setIsCustomSpeed(false);
+      }
+  };
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
@@ -372,7 +762,7 @@ export default function App() {
           togglePlay();
           e.preventDefault();
       }
-      if (e.key === 'b' && (e.metaKey || e.ctrlKey)) { // Ctrl+B for Blade/Cut
+      if (e.key === 'b' && (e.metaKey || e.ctrlKey)) { 
           handleSplitClip();
           e.preventDefault();
       }
@@ -382,14 +772,12 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleUndo, handleRedo, handleDeleteClip, selectedClipId, isPlaying, clips, currentTime]);
 
-  // --- Event Handlers ---
-
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
       setVideoFile(file);
       const url = URL.createObjectURL(file);
-      setVideoUrl(url); // Sets as main source
+      setVideoUrl(url); 
       setMessages(prev => [...prev, { role: 'model', text: `Loaded **${file.name}**. Click "Analyze Video" to process it with **Gemini 3 Pro**.` }]);
       
       setCurrentTime(0);
@@ -398,7 +786,7 @@ export default function App() {
     }
   };
 
-  const handleAddMedia = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAddMedia = (event: React.ChangeEvent<HTMLInputElement>, trackId: number) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -408,49 +796,33 @@ export default function App() {
 
     if (!isImage && !isVideo) return;
 
+    const trackClips = clips.filter(c => c.trackId === trackId);
+    const trackEndTime = trackClips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0);
+
     const newClipBase = {
         id: crypto.randomUUID(),
         title: file.name,
-        startTime: clips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0),
+        startTime: trackEndTime,
         sourceStartTime: 0,
         type: isImage ? 'image' : 'video' as 'image' | 'video',
-        sourceUrl: url
+        sourceUrl: url,
+        trackId: trackId,
+        transform: { x: 0, y: 0, scale: 1, rotation: 0 },
+        speed: 1
     };
 
     if (isImage) {
-        // Images default to 3 seconds
         const newClip: Clip = { ...newClipBase, duration: 3 };
         setClipsWithHistory([...clips, newClip]);
-        setMessages(prev => [...prev, { role: 'system', text: `Added image "${file.name}"` }]);
+        setMessages(prev => [...prev, { role: 'system', text: `Added image to Track ${trackId + 1}` }]);
     } else {
-        // Videos need metadata to determine duration
         const tempVideo = document.createElement('video');
         tempVideo.src = url;
         tempVideo.onloadedmetadata = () => {
              const newClip: Clip = { ...newClipBase, duration: tempVideo.duration, totalDuration: tempVideo.duration };
              setClipsWithHistory([...clips, newClip]);
-             setMessages(prev => [...prev, { role: 'system', text: `Added video "${file.name}"` }]);
+             setMessages(prev => [...prev, { role: 'system', text: `Added video to Track ${trackId + 1}` }]);
         };
-    }
-  };
-
-  const handleVideoLoad = (e: React.SyntheticEvent<HTMLVideoElement>) => {
-    // Only set initial clips if we have NO clips or just the default demo ones, AND this is the main video file loading
-    const duration = e.currentTarget.duration;
-    if (duration && !isNaN(duration) && videoFile && clips === INITIAL_CLIPS) {
-        setClipsWithHistory([
-            {
-                id: 'main-clip',
-                title: videoFile.name,
-                duration: duration,
-                startTime: 0,
-                sourceStartTime: 0,
-                type: 'video',
-                sourceUrl: videoUrl || undefined,
-                totalDuration: duration
-            }
-        ]);
-        setSelectedClipId(null);
     }
   };
 
@@ -477,10 +849,8 @@ export default function App() {
   const handleSuggestEdits = async () => {
     setIsAnalyzing(true);
     setMessages(prev => [...prev, { role: 'user', text: 'Suggest some edits.' }]);
-
     try {
       const suggestions = await suggestEdits(clips);
-      
       if (suggestions.length > 0) {
         setMessages(prev => [...prev, { 
           role: 'model', 
@@ -497,13 +867,10 @@ export default function App() {
     }
   };
 
-  // --- Chat Action Parser ---
   const parseUserAction = (text: string) => {
       const lowerText = text.toLowerCase();
-      // "Cut" command
       if (lowerText.includes('cut') || lowerText.includes('split')) {
           handleSplitClip();
-          // We let the System Message handle the feedback instead of a redundant Model message
           return { handled: true, response: null }; 
       }
       return { handled: false, response: "" };
@@ -511,12 +878,10 @@ export default function App() {
 
   const handleSendMessage = async () => {
     if (!inputText.trim()) return;
-    
     const text = inputText;
     setInputText('');
     setMessages(prev => [...prev, { role: 'user', text }]);
 
-    // 1. Check for Actions
     const actionResult = parseUserAction(text);
     if (actionResult.handled) {
         if (actionResult.response) {
@@ -525,7 +890,6 @@ export default function App() {
         return;
     }
 
-    // 2. Fallback to Gemini
     if (videoFile) {
         setIsAnalyzing(true);
         try {
@@ -549,16 +913,39 @@ export default function App() {
   const handleSeek = (time: number) => {
     const newTime = Math.max(0, time);
     setCurrentTime(newTime);
-    const active = clips.find(c => newTime >= c.startTime && newTime < c.startTime + c.duration);
-    if (active && active.type !== 'image' && videoRef.current) {
-        const offsetInClip = newTime - active.startTime;
-        videoRef.current.currentTime = active.sourceStartTime + offsetInClip;
-    }
+    
+    // Sync logic on seek
+    const visibleClips = clips.filter(c => newTime >= c.startTime && newTime < c.startTime + c.duration);
+    visibleClips.forEach(clip => {
+         if (clip.type === 'video' && videoRefs.current[clip.id]) {
+            const el = videoRefs.current[clip.id];
+            if (el) {
+                const speed = clip.speed || 1;
+                const offsetInClip = newTime - clip.startTime;
+                el.currentTime = clip.sourceStartTime + (offsetInClip * speed);
+            }
+         }
+    });
+  };
+
+  // Derive visible clips for rendering (Layers)
+  const visibleClips = clips
+        .filter(c => currentTime >= c.startTime && currentTime < c.startTime + c.duration)
+        .sort((a, b) => a.trackId - b.trackId); 
+
+  const selectedClip = clips.find(c => c.id === selectedClipId);
+  const isSelectedClipVisible = selectedClip && visibleClips.some(vc => vc.id === selectedClip.id);
+
+  const formatTime = (seconds: number) => {
+      const m = Math.floor(seconds / 60);
+      const s = Math.floor(seconds % 60);
+      const ms = Math.floor((seconds % 1) * 100);
+      return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
   };
 
   return (
     <div className="flex flex-col h-screen bg-neutral-950 text-neutral-100 font-sans overflow-hidden">
-      {/* 1. Header */}
+      {/* Header */}
       <header className="h-14 border-b border-neutral-800 flex items-center px-4 justify-between bg-neutral-900/50 backdrop-blur-sm z-10">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
@@ -577,6 +964,17 @@ export default function App() {
                 <RotateCw className="w-4 h-4" />
             </button>
           </div>
+          
+           {/* EXPORT BUTTON IN HEADER */}
+           <button 
+                onClick={handleExport}
+                disabled={isExporting}
+                className="flex items-center gap-2 text-sm text-white bg-green-600 hover:bg-green-700 px-4 py-1.5 rounded-full shadow-lg transition-all disabled:opacity-50"
+           >
+                {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                <span>{isExporting ? `${exportProgress}%` : 'Export MP4'}</span>
+           </button>
+
            <label className="flex items-center gap-2 text-sm text-white cursor-pointer transition-all bg-blue-600 hover:bg-blue-700 px-4 py-1.5 rounded-full shadow-lg hover:shadow-blue-500/20 active:scale-95 font-medium">
             <Upload className="w-4 h-4" />
             <span>Import Video</span>
@@ -588,77 +986,221 @@ export default function App() {
       <div className="flex flex-1 min-h-0">
         <div className="flex-1 flex flex-col min-w-0">
           
-          {/* 2. Video Canvas */}
-          <div className="flex-1 bg-neutral-950 relative flex items-center justify-center p-8">
-            <div className="relative w-full max-w-4xl aspect-video bg-neutral-900 rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 group">
+          {/* Video Canvas Container */}
+          <div className="flex-1 bg-neutral-950 flex flex-col">
               
-              {/* VIDEO LAYER - Renders if active clip is video or if we have a main videoUrl acting as placeholder */}
-              {((activeClip?.type !== 'image') && (activeClip?.sourceUrl || videoUrl)) && (
-                    <video 
-                    ref={videoRef}
-                    // Dynamically switch source. 
-                    // Note: In a real app we'd want to preload or use multiple video elements to avoid black flashes
-                    src={activeClip?.sourceUrl || videoUrl || ''} 
-                    onLoadedMetadata={handleVideoLoad}
-                    className="absolute inset-0 w-full h-full object-contain pointer-events-none bg-black"
-                    muted={false} 
+              <div 
+                className="flex-1 relative flex items-center justify-center p-8 overflow-hidden" 
+                onClick={handleCanvasClick}
+              >
+                <div ref={containerRef} className="relative w-full max-w-4xl aspect-video bg-neutral-900 rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 group">
+                
+                {/* RENDER LAYERS */}
+                {visibleClips.map((clip) => {
+                    const transform = clip.transform || { x: 0, y: 0, scale: 1, rotation: 0 };
+                    const isSelected = selectedClipId === clip.id;
+                    const style: React.CSSProperties = {
+                        position: 'absolute',
+                        left: '50%',
+                        top: '50%',
+                        width: '100%',
+                        height: '100%',
+                        transform: `translate(-50%, -50%) translate(${transform.x * 100}%, ${transform.y * 100}%) scale(${transform.scale}) rotate(${transform.rotation}deg)`,
+                        objectFit: 'contain',
+                        cursor: isPlaying ? 'default' : 'pointer',
+                        zIndex: clip.trackId * 10,
+                    };
+
+                    const handleClipClick = (e: React.MouseEvent) => {
+                        e.stopPropagation();
+                        if (!isPlaying) {
+                            handleSelectClip(clip.id);
+                        }
+                    };
+
+                    if (clip.type === 'video') {
+                        return (
+                            <div key={clip.id} style={style} onClick={handleClipClick} className={isPlaying ? 'pointer-events-none' : ''}>
+                                <video 
+                                    ref={(el) => { videoRefs.current[clip.id] = el; }}
+                                    src={clip.sourceUrl || videoUrl || ''}
+                                    className="w-full h-full object-contain pointer-events-none" 
+                                    muted={false} 
+                                    playsInline // Crucial for reliable seek/play behavior
+                                    crossOrigin={(!clip.sourceUrl && !videoUrl) ? undefined : "anonymous"} // Conditional for DOM playback if needed, but safe here
+                                />
+                            </div>
+                        );
+                    } else {
+                        return (
+                            <div key={clip.id} style={style} onClick={handleClipClick} className={isPlaying ? 'pointer-events-none' : ''}>
+                                <img 
+                                    src={clip.sourceUrl || ''}
+                                    alt={clip.title}
+                                    className="w-full h-full object-contain pointer-events-none"
+                                />
+                            </div>
+                        );
+                    }
+                })}
+
+                {/* Empty State */}
+                {!videoUrl && clips.length === 0 && (
+                    <label className="absolute inset-0 flex flex-col items-center justify-center text-neutral-500 hover:text-neutral-300 cursor-pointer transition-colors z-20">
+                        <Video className="w-16 h-16 mb-4 opacity-20" />
+                        <p className="font-medium text-lg mb-2">Click to upload video</p>
+                        <p className="text-sm opacity-50">or drag and drop here</p>
+                        <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
+                    </label>
+                )}
+
+                {/* Canvas Controls Overlay (Transform) - ONLY SHOW IF NOT PLAYING */}
+                {!isPlaying && isSelectedClipVisible && selectedClip && (
+                    <CanvasControls 
+                        clip={selectedClip} 
+                        containerRef={containerRef} 
+                        onUpdate={handleUpdateClipTransform} 
                     />
-              )}
-
-              {/* IMAGE LAYER - Renders if active clip is an image */}
-              {activeClip?.type === 'image' && activeClip.sourceUrl && (
-                  <img 
-                    src={activeClip.sourceUrl} 
-                    alt={activeClip.title}
-                    className="absolute inset-0 w-full h-full object-contain bg-black z-10"
-                  />
-              )}
-
-              {/* EMPTY STATE */}
-              {!videoUrl && !activeClip && (
-                 <label className="absolute inset-0 flex flex-col items-center justify-center text-neutral-500 hover:text-neutral-300 cursor-pointer transition-colors z-20">
-                    <Video className="w-16 h-16 mb-4 opacity-20" />
-                    <p className="font-medium text-lg mb-2">Click to upload video</p>
-                    <p className="text-sm opacity-50">or drag and drop here</p>
-                    <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
-                 </label>
-              )}
-
-              {/* PLAY BUTTON OVERLAY */}
-              {(videoUrl || (clips.length > 0)) && (
-                    <div 
-                        className="absolute inset-0 z-30 cursor-pointer" 
-                        onClick={togglePlay}
-                    >
-                        <div className={`absolute inset-0 flex items-center justify-center transition-opacity duration-200 ${isPlaying ? 'opacity-0 hover:opacity-100' : 'opacity-100'}`}>
-                            <button className="w-20 h-20 bg-black/60 backdrop-blur-md rounded-full flex items-center justify-center text-white ring-1 ring-white/20 shadow-2xl hover:scale-105 transition-transform">
-                                {isPlaying ? <Pause className="fill-current w-8 h-8" /> : <Play className="fill-current w-8 h-8 ml-1" />}
-                            </button>
+                )}
+                
+                {/* Export Overlay */}
+                {isExporting && (
+                    <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-50">
+                        <Loader2 className="w-12 h-12 text-green-500 animate-spin mb-4" />
+                        <h3 className="text-xl font-bold text-white mb-2">Rendering Video...</h3>
+                        <p className="text-neutral-400 mb-4">Frame by frame analysis to ensure smooth motion</p>
+                        <div className="w-64 h-2 bg-neutral-800 rounded-full overflow-hidden">
+                            <div 
+                                className="h-full bg-green-500 transition-all duration-75"
+                                style={{ width: `${exportProgress}%` }}
+                            />
                         </div>
                     </div>
-              )}
-              
+                )}
+                
+                <div className="absolute top-4 left-4 bg-black/60 backdrop-blur px-2 py-1 rounded text-xs font-mono text-neutral-400 border border-white/5 z-40 pointer-events-none">
+                    VIRTUAL PLAYER ENGINE
+                </div>
+                </div>
+              </div>
 
-               <div className="absolute top-4 left-4 bg-black/60 backdrop-blur px-2 py-1 rounded text-xs font-mono text-neutral-400 border border-white/5 z-40 pointer-events-none">
-                 VIRTUAL PLAYER ENGINE
-               </div>
-            </div>
+              {/* Player Control Bar */}
+              <div className="h-12 bg-neutral-900 border-t border-neutral-800 flex items-center justify-between px-6 z-[200] relative">
+                  <div className="flex items-center gap-4">
+                      <button 
+                          onClick={togglePlay}
+                          className="w-8 h-8 flex items-center justify-center rounded-full bg-white text-black hover:bg-neutral-200 transition-colors"
+                      >
+                          {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
+                      </button>
+                      <span className="font-mono text-sm text-neutral-400">
+                          <span className="text-white">{formatTime(currentTime)}</span>
+                      </span>
+                  </div>
+                  
+                  <div className="flex items-center gap-2">
+                       {/* Speed and Other Controls */}
+                       {selectedClip && selectedClip.type === 'video' && (
+                           <div className="relative">
+                               <button 
+                                   onClick={() => {
+                                       setShowSpeedMenu(!showSpeedMenu);
+                                       setIsCustomSpeed(false);
+                                   }}
+                                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${showSpeedMenu ? 'bg-blue-600 text-white' : 'bg-neutral-800 text-neutral-300 hover:text-white hover:bg-neutral-700'}`}
+                               >
+                                   <Gauge className="w-3.5 h-3.5" />
+                                   {selectedClip.speed}x
+                                   <ChevronUp className={`w-3 h-3 transition-transform ${showSpeedMenu ? 'rotate-180' : ''}`} />
+                               </button>
+                               
+                               {showSpeedMenu && (
+                                   <div className="absolute bottom-full mb-2 right-0 bg-neutral-800 border border-neutral-700 rounded-lg shadow-xl overflow-hidden min-w-[140px] flex flex-col p-1 z-50 animate-in fade-in zoom-in-95 duration-100 origin-bottom-right">
+                                       {!isCustomSpeed ? (
+                                           <>
+                                               {[0.25, 0.5, 1, 1.5, 2, 4, 8].map(s => (
+                                                   <button
+                                                       key={s}
+                                                       onClick={() => handleClipSpeed(selectedClip.id, s)}
+                                                       className={`text-left px-3 py-1.5 text-xs rounded hover:bg-neutral-700 transition-colors w-full ${selectedClip.speed === s ? 'text-blue-400 font-bold bg-neutral-700/50' : 'text-neutral-300'}`}
+                                                   >
+                                                       {s}x
+                                                   </button>
+                                               ))}
+                                               <div className="h-px bg-neutral-700/50 my-1 mx-2" />
+                                                <button
+                                                    onClick={() => {
+                                                        setIsCustomSpeed(true);
+                                                        setCustomSpeedText(selectedClip.speed?.toString() || '1');
+                                                    }}
+                                                    className="text-left px-3 py-1.5 text-xs rounded hover:bg-neutral-700 text-neutral-300 hover:text-white transition-colors flex justify-between items-center group w-full"
+                                                >
+                                                    <span>Custom...</span>
+                                                    <ChevronRight className="w-3 h-3 text-neutral-500 group-hover:text-white" />
+                                                </button>
+                                           </>
+                                       ) : (
+                                            <div className="p-2 w-32">
+                                                <button 
+                                                    onClick={() => setIsCustomSpeed(false)}
+                                                    className="flex items-center gap-1 mb-3 text-[10px] font-medium text-neutral-400 hover:text-white uppercase tracking-wider transition-colors"
+                                                >
+                                                   <ChevronLeft className="w-3 h-3" /> Back
+                                                </button>
+                                                <div className="space-y-2">
+                                                    <div className="relative">
+                                                        <input 
+                                                           autoFocus
+                                                           type="number"
+                                                           step="0.1"
+                                                           min="0.1"
+                                                           max="10"
+                                                           value={customSpeedText}
+                                                           onChange={(e) => setCustomSpeedText(e.target.value)}
+                                                           onKeyDown={(e) => {
+                                                               e.stopPropagation(); // Prevent global hotkeys
+                                                               if (e.key === 'Enter') {
+                                                                   const val = parseFloat(customSpeedText);
+                                                                   if (!isNaN(val) && val > 0) handleClipSpeed(selectedClip.id, val);
+                                                               }
+                                                           }}
+                                                           className="w-full bg-neutral-900 border border-neutral-600 rounded px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all placeholder:text-neutral-600 pr-6"
+                                                           placeholder="1.0"
+                                                        />
+                                                        <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-neutral-500 font-medium">x</span>
+                                                    </div>
+                                                    <button 
+                                                       onClick={() => {
+                                                           const val = parseFloat(customSpeedText);
+                                                           if (!isNaN(val) && val > 0) handleClipSpeed(selectedClip.id, val);
+                                                       }}
+                                                       className="w-full bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-medium py-1.5 rounded transition-colors"
+                                                   >
+                                                       Apply
+                                                    </button>
+                                                </div>
+                                           </div>
+                                       )}
+                                   </div>
+                               )}
+                           </div>
+                       )}
+
+                       <button className="p-2 hover:bg-neutral-800 rounded-md text-neutral-400 hover:text-white transition-colors">
+                           <Scissors className="w-4 h-4" onClick={handleSplitClip} />
+                       </button>
+                       <button className="p-2 hover:bg-neutral-800 rounded-md text-neutral-400 hover:text-white transition-colors">
+                           <Maximize2 className="w-4 h-4" />
+                       </button>
+                  </div>
+              </div>
           </div>
 
-          {/* 3. Timeline */}
-          <div className="h-56 border-t border-neutral-800 bg-neutral-900/50 backdrop-blur-sm z-10 flex flex-col">
-             <div className="h-10 border-b border-neutral-800 flex items-center justify-between px-4 text-xs text-neutral-400">
-                <div className="flex gap-4">
-                    <span className="hover:text-white cursor-pointer flex items-center gap-1"><Video size={12}/> Track 1</span>
-                </div>
-                <div className="flex gap-2">
-                    <button onClick={handleSplitClip} className="hover:text-white flex items-center gap-1" title="Split Clip (Ctrl+B)">
-                        <Scissors size={12}/> Split
-                    </button>
-                </div>
-            </div>
+          {/* Timeline */}
+          <div className="h-64 border-t border-neutral-800 bg-neutral-900/50 backdrop-blur-sm z-10 flex flex-col">
             <Timeline 
                 clips={clips} 
+                tracks={tracks}
                 currentTime={currentTime} 
                 onSeek={handleSeek} 
                 onDelete={handleDeleteClip}
@@ -666,12 +1208,13 @@ export default function App() {
                 onAddMedia={handleAddMedia}
                 onResize={handleClipResize}
                 onReorder={handleClipReorder}
+                onAddTrack={handleAddTrack}
                 selectedClipId={selectedClipId}
             />
           </div>
         </div>
 
-        {/* 4. Sidebar */}
+        {/* Sidebar */}
         <aside className="w-80 border-l border-neutral-800 bg-neutral-900 flex flex-col z-20">
           <div className="p-4 border-b border-neutral-800 flex items-center gap-2">
             <Wand2 className="w-4 h-4 text-purple-400" />
@@ -680,7 +1223,6 @@ export default function App() {
 
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.map((msg, idx) => {
-              // --- SYSTEM MESSAGE RENDERING ---
               if (msg.role === 'system') {
                 return (
                    <div key={idx} className="flex justify-center my-3 opacity-80 hover:opacity-100 transition-opacity">
@@ -691,7 +1233,6 @@ export default function App() {
                 );
               }
 
-              // --- CHAT MESSAGE RENDERING ---
               return (
                 <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                   <div className={`max-w-[90%] rounded-2xl px-4 py-2.5 text-sm ${
@@ -699,9 +1240,7 @@ export default function App() {
                       ? 'bg-blue-600 text-white rounded-br-none' 
                       : 'bg-neutral-800 text-neutral-200 rounded-bl-none border border-neutral-700'
                   }`}>
-                    {/* Markdown Renderer */}
                     {msg.role === 'model' ? <MarkdownText text={msg.text} /> : msg.text}
-                    
                     {msg.suggestions && msg.suggestions.length > 0 && (
                       <div className="mt-4 flex flex-col gap-2">
                           {msg.suggestions.map((s, i) => (

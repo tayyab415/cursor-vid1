@@ -1,21 +1,24 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { Clip } from '../types';
-import { X, Plus, Image as ImageIcon, Video } from 'lucide-react';
+import { X, Plus, Image as ImageIcon, Video, Layers, GripVertical } from 'lucide-react';
 
 interface TimelineProps {
   clips: Clip[];
+  tracks: number[]; // Array of track IDs
   currentTime: number;
   onSeek: (time: number) => void;
   onDelete: (id: string) => void;
   onSelect: (id: string) => void;
-  onAddMedia: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onAddMedia: (e: React.ChangeEvent<HTMLInputElement>, trackId: number) => void;
   onResize: (id: string, newDuration: number, mode: 'start' | 'end', commit: boolean) => void;
-  onReorder: (sourceId: string, targetId: string) => void;
+  onReorder: (sourceId: string, targetId: string | null, targetTrackId: number) => void;
+  onAddTrack: (position: 'top' | 'bottom') => void;
   selectedClipId: string | null;
 }
 
 export const Timeline: React.FC<TimelineProps> = ({ 
     clips, 
+    tracks,
     currentTime, 
     onSeek, 
     onDelete, 
@@ -23,6 +26,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     onAddMedia,
     onResize,
     onReorder,
+    onAddTrack,
     selectedClipId 
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -36,6 +40,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // State for Reordering
   const [dragOverClipId, setDragOverClipId] = useState<string | null>(null);
+  const [dragOverTrackId, setDragOverTrackId] = useState<number | null>(null);
 
   // Auto-scroll logic: Keep playhead centered
   useEffect(() => {
@@ -107,13 +112,12 @@ export const Timeline: React.FC<TimelineProps> = ({
   }, [dragState, onResize]);
 
 
-  // Calculate total duration
+  // Calculate total duration (max of all tracks)
   const totalDuration = clips.reduce((acc, clip) => Math.max(acc, clip.startTime + clip.duration), 0);
   
-  // Generate markers every 5 seconds. 
+  // Generate markers
   const markers: number[] = [];
   const interval = 5;
-  // Make timeline slightly longer than content to fit the add button
   const endMarker = Math.max(Math.ceil(totalDuration / interval) * interval + interval, 30);
   
   for (let t = 0; t <= endMarker; t += interval) {
@@ -127,7 +131,6 @@ export const Timeline: React.FC<TimelineProps> = ({
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
-      // Don't seek if clicking buttons, inputs, DRAG HANDLES, or CLIPS (to allow drag)
       if ((e.target as HTMLElement).closest('button') || 
           (e.target as HTMLElement).closest('label') ||
           (e.target as HTMLElement).hasAttribute('data-resize-handle') ||
@@ -176,7 +179,6 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // --- Drag and Drop Handlers ---
   const handleDragStart = (e: React.DragEvent, id: string) => {
-      // Prevent drag if we clicked a resize handle
       if ((e.target as HTMLElement).hasAttribute('data-resize-handle')) {
           e.preventDefault();
           return;
@@ -185,153 +187,199 @@ export const Timeline: React.FC<TimelineProps> = ({
       e.dataTransfer.effectAllowed = 'move';
   };
 
-  const handleDragOver = (e: React.DragEvent, id: string) => {
-      e.preventDefault(); // Necessary to allow dropping
+  const handleTrackDragOver = (e: React.DragEvent, trackId: number) => {
+      e.preventDefault(); 
+      if (dragOverTrackId !== trackId) {
+          setDragOverTrackId(trackId);
+      }
+  };
+
+  const handleClipDragOver = (e: React.DragEvent, id: string) => {
+      e.preventDefault();
+      e.stopPropagation(); // Stop bubbling to track
       if (dragOverClipId !== id) {
           setDragOverClipId(id);
       }
   };
 
-  const handleDrop = (e: React.DragEvent, targetId: string) => {
+  const handleDrop = (e: React.DragEvent, targetTrackId: number, targetClipId: string | null = null) => {
       e.preventDefault();
+      e.stopPropagation();
       const sourceId = e.dataTransfer.getData('text/plain');
-      if (sourceId && sourceId !== targetId) {
-          onReorder(sourceId, targetId);
+      
+      if (sourceId) {
+          onReorder(sourceId, targetClipId, targetTrackId);
       }
       setDragOverClipId(null);
+      setDragOverTrackId(null);
   };
 
-  const handleDragEnd = () => {
-      setDragOverClipId(null);
+  const handleDragLeave = () => {
+      // Small debounce or check could improve UI flickering, simple reset for now
+      // setDragOverClipId(null);
+      // setDragOverTrackId(null);
   };
 
   return (
-    <div className="w-full h-full bg-neutral-900 border-t border-neutral-800 p-4 overflow-x-auto scroll-smooth relative select-none">
-      <div 
-        className="min-w-max relative h-full cursor-crosshair"
-        ref={containerRef}
-        onMouseDown={handleMouseDown}
-      >
-        
-        {/* Playhead */}
-        <div 
-            className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-30 pointer-events-none transition-all duration-75 ease-linear"
-            style={{ left: `${currentTime * 40}px` }}
-        >
-            <div className="absolute -top-1.5 -left-[4px] w-2.5 h-2.5 bg-red-500 rotate-45 border border-red-600 shadow-sm" />
-            <div className="absolute top-0 bottom-0 left-0 right-0 bg-red-500/20 w-px blur-[1px]" />
-        </div>
-
-        {/* Clips Row */}
-        <div className="flex items-center pt-4 relative" style={{ height: '120px' }}>
-          {clips.map((clip) => {
-            const isActive = currentTime >= clip.startTime && currentTime < (clip.startTime + clip.duration);
-            const isSelected = selectedClipId === clip.id;
-            const isDragTarget = dragOverClipId === clip.id;
-            
-            return (
-                <div
-                key={clip.id}
-                draggable={true}
-                onDragStart={(e) => handleDragStart(e, clip.id)}
-                onDragOver={(e) => handleDragOver(e, clip.id)}
-                onDrop={(e) => handleDrop(e, clip.id)}
-                onDragEnd={handleDragEnd}
-                onDragLeave={() => setDragOverClipId(null)}
-                onClick={(e) => {
-                    e.stopPropagation();
-                    onSelect(clip.id);
-                }}
-                className={`group relative h-24 rounded-md flex flex-col justify-between p-2 transition-all duration-200 ease-out border overflow-hidden cursor-grab active:cursor-grabbing ${
-                    isSelected 
-                        ? 'bg-blue-600/50 border-white ring-2 ring-white/50 z-20 shadow-[0_0_15px_rgba(37,99,235,0.5)]'
-                        : isActive 
-                            ? 'bg-blue-600/40 border-white shadow-[0_0_10px_rgba(255,255,255,0.3)] z-10' 
-                            : 'bg-blue-600/20 border-blue-500/30 hover:bg-blue-600/30'
-                }`}
-                style={{ 
-                    position: 'absolute',
-                    left: `${clip.startTime * 40}px`,
-                    width: `${clip.duration * 40}px`,
-                    transition: dragState?.active ? 'none' : 'left 0.3s ease, width 0.1s ease', // Smooth movement for magnet effect
-                    // Visual cue for insertion
-                    boxShadow: isDragTarget ? '-4px 0 0 0 #ffffff' : undefined
-                }}
+    <div className="w-full h-full bg-neutral-900 border-t border-neutral-800 flex flex-col relative select-none">
+       {/* Toolbar */}
+       <div className="h-8 border-b border-neutral-800 flex items-center justify-between px-2 bg-neutral-800/50">
+           <div className="flex items-center gap-2">
+                <button 
+                    onClick={() => onAddTrack('top')}
+                    className="flex items-center gap-1 text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-2 py-0.5 rounded text-neutral-300 hover:text-white transition-colors"
                 >
-                    {/* LEFT RESIZE HANDLE */}
-                    <div 
-                        data-resize-handle
-                        className="absolute left-0 top-0 bottom-0 w-4 cursor-w-resize hover:bg-white/20 z-40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                        onMouseDown={(e) => startResize(e, clip, 'start')}
-                    >
-                        <div className="w-1 h-8 bg-white/50 rounded-full" />
-                    </div>
+                    <Layers size={10} /> Add Track Above
+                </button>
+                <button 
+                    onClick={() => onAddTrack('bottom')}
+                    className="flex items-center gap-1 text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-2 py-0.5 rounded text-neutral-300 hover:text-white transition-colors"
+                >
+                    <Layers size={10} /> Add Track Below
+                </button>
+           </div>
+           <span className="text-[10px] text-neutral-500 font-mono">
+               Total: {formatTime(totalDuration)}
+           </span>
+       </div>
 
-                    {/* RIGHT RESIZE HANDLE */}
-                    <div 
-                        data-resize-handle
-                        className="absolute right-0 top-0 bottom-0 w-4 cursor-e-resize hover:bg-white/20 z-40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                        onMouseDown={(e) => startResize(e, clip, 'end')}
-                    >
-                        <div className="w-1 h-8 bg-white/50 rounded-full" />
-                    </div>
+      <div className="flex-1 overflow-x-auto overflow-y-auto scroll-smooth relative">
+        <div 
+            className="min-w-max relative min-h-full cursor-crosshair pb-8"
+            ref={containerRef}
+            onMouseDown={handleMouseDown}
+        >
+            
+            {/* Playhead */}
+            <div 
+                className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-50 pointer-events-none"
+                style={{ left: `${currentTime * 40}px` }}
+            >
+                <div className="absolute -top-1.5 -left-[4px] w-2.5 h-2.5 bg-red-500 rotate-45 border border-red-600 shadow-sm" />
+                <div className="absolute top-0 bottom-0 left-0 right-0 bg-red-500/20 w-px blur-[1px]" />
+            </div>
 
+            {/* Tracks Render Loop */}
+            <div className="flex flex-col py-4 gap-2">
+                {/* We map tracks in reverse order visually so higher IDs are on top */}
+                {[...tracks].reverse().map((trackId) => {
+                    const trackClips = clips.filter(c => c.trackId === trackId);
+                    const isTrackDragOver = dragOverTrackId === trackId;
 
-                    {/* Delete Button */}
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onDelete(clip.id);
-                        }}
-                        className="absolute top-1 right-1 p-1 rounded-full bg-black/40 hover:bg-red-500 text-white/70 hover:text-white opacity-0 group-hover:opacity-100 transition-all z-30"
-                        title="Delete clip (Backspace)"
-                    >
-                        <X size={12} strokeWidth={3} />
-                    </button>
+                    return (
+                        <div key={trackId} className="relative">
+                            {/* Track Header/Label (Sticky left in a real app, here simple absolute) */}
+                            <div className="absolute left-2 -top-3 text-[9px] font-bold text-neutral-600 uppercase tracking-widest pointer-events-none z-10">
+                                Track {trackId + 1}
+                            </div>
 
-                    <div className="flex items-center gap-1.5 mb-1 pointer-events-none">
-                        {clip.type === 'image' ? <ImageIcon size={10} className="text-purple-300" /> : <Video size={10} className="text-blue-300" />}
-                        <span className={`text-xs font-medium truncate ${isActive || isSelected ? 'text-white' : 'text-blue-100'}`}>{clip.title}</span>
-                    </div>
-                    
-                    <span className={`text-[10px] pointer-events-none ${isActive || isSelected ? 'text-yellow-200' : 'text-blue-300'}`}>{clip.duration.toFixed(1)}s</span>
-                    
+                            {/* Track Lane */}
+                            <div 
+                                className={`h-24 w-full relative transition-colors ${isTrackDragOver ? 'bg-blue-900/10' : 'bg-neutral-800/20'} border-y border-neutral-800/30`}
+                                style={{ minWidth: `${(endMarker + 10) * 40}px` }}
+                                onDragOver={(e) => handleTrackDragOver(e, trackId)}
+                                onDrop={(e) => handleDrop(e, trackId, null)}
+                                onDragLeave={() => setDragOverTrackId(null)}
+                            >
+                                {trackClips.map((clip) => {
+                                    const isActive = currentTime >= clip.startTime && currentTime < (clip.startTime + clip.duration);
+                                    const isSelected = selectedClipId === clip.id;
+                                    const isClipDragTarget = dragOverClipId === clip.id;
+
+                                    return (
+                                        <div
+                                            key={clip.id}
+                                            draggable={true}
+                                            onDragStart={(e) => handleDragStart(e, clip.id)}
+                                            onDragOver={(e) => handleClipDragOver(e, clip.id)}
+                                            onDrop={(e) => handleDrop(e, trackId, clip.id)}
+                                            onDragLeave={() => setDragOverClipId(null)}
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                onSelect(clip.id);
+                                            }}
+                                            className={`group absolute top-1 bottom-1 rounded-md flex flex-col justify-between p-2 transition-all duration-200 ease-out border overflow-hidden cursor-grab active:cursor-grabbing ${
+                                                isSelected 
+                                                    ? 'bg-blue-600/50 border-white ring-2 ring-white/50 z-20 shadow-[0_0_15px_rgba(37,99,235,0.5)]'
+                                                    : isActive 
+                                                        ? 'bg-blue-600/40 border-white shadow-[0_0_10px_rgba(255,255,255,0.3)] z-10' 
+                                                        : 'bg-blue-600/20 border-blue-500/30 hover:bg-blue-600/30'
+                                            }`}
+                                            style={{ 
+                                                left: `${clip.startTime * 40}px`,
+                                                width: `${clip.duration * 40}px`,
+                                                transition: dragState?.active ? 'none' : 'left 0.3s ease, width 0.1s ease',
+                                                boxShadow: isClipDragTarget ? '-4px 0 0 0 #ffffff' : undefined
+                                            }}
+                                        >
+                                            {/* Resize Handles */}
+                                            <div 
+                                                data-resize-handle
+                                                className="absolute left-0 top-0 bottom-0 w-3 cursor-w-resize hover:bg-white/20 z-40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                                                onMouseDown={(e) => startResize(e, clip, 'start')}
+                                            ><div className="w-0.5 h-6 bg-white/50 rounded-full" /></div>
+
+                                            <div 
+                                                data-resize-handle
+                                                className="absolute right-0 top-0 bottom-0 w-3 cursor-e-resize hover:bg-white/20 z-40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                                                onMouseDown={(e) => startResize(e, clip, 'end')}
+                                            ><div className="w-0.5 h-6 bg-white/50 rounded-full" /></div>
+
+                                            {/* Content */}
+                                            <div className="flex items-center gap-1.5 mb-1 pointer-events-none">
+                                                {clip.type === 'image' ? <ImageIcon size={10} className="text-purple-300" /> : <Video size={10} className="text-blue-300" />}
+                                                <span className={`text-xs font-medium truncate ${isActive || isSelected ? 'text-white' : 'text-blue-100'}`}>{clip.title}</span>
+                                            </div>
+                                            <span className={`text-[10px] pointer-events-none ${isActive || isSelected ? 'text-yellow-200' : 'text-blue-300'}`}>{clip.duration.toFixed(1)}s</span>
+
+                                            {/* Close/Delete */}
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    onDelete(clip.id);
+                                                }}
+                                                className="absolute top-1 right-1 p-0.5 rounded-full bg-black/40 hover:bg-red-500 text-white/70 hover:text-white opacity-0 group-hover:opacity-100 transition-all z-30"
+                                            >
+                                                <X size={10} strokeWidth={3} />
+                                            </button>
+                                        </div>
+                                    );
+                                })}
+
+                                {/* Add Media Button (Per Track) */}
+                                <label 
+                                    className="group absolute h-20 w-20 border-2 border-dashed border-neutral-700/50 hover:border-blue-500/50 bg-neutral-800/10 hover:bg-blue-500/5 rounded-lg flex flex-col items-center justify-center cursor-pointer transition-all z-0 top-2 hover:scale-105 active:scale-95"
+                                    style={{ 
+                                        left: `${(trackClips.reduce((max, c) => Math.max(max, c.startTime + c.duration), 0) * 40) + 20}px`,
+                                        transition: dragState?.active ? 'none' : 'left 0.3s ease'
+                                    }}
+                                >
+                                    <div className="w-6 h-6 rounded-full bg-neutral-700 group-hover:bg-blue-500 flex items-center justify-center transition-colors">
+                                        <Plus className="w-3 h-3 text-neutral-400 group-hover:text-white" strokeWidth={3} />
+                                    </div>
+                                    <input type="file" accept="video/*,image/*" className="hidden" onChange={(e) => onAddMedia(e, trackId)} />
+                                </label>
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+
+            {/* Time markers Row */}
+            <div className="relative mt-2 h-6 border-t border-neutral-800/50 pt-1" style={{ width: `${(endMarker + 10) * 40}px` }}>
+            {markers.map((time) => (
+                <div 
+                    key={time} 
+                    className="absolute top-0 flex flex-col items-center"
+                    style={{ left: `${time * 40}px`, transform: 'translateX(-50%)' }}
+                >
+                    <div className="h-1.5 w-px bg-neutral-600 mb-1"></div>
+                    <span className="text-[10px] text-neutral-500 font-mono select-none">
+                        {formatTime(time)}
+                    </span>
                 </div>
-            );
-          })}
-
-          {/* ADD BUTTON */}
-          <label 
-            className="group absolute h-24 w-24 border-2 border-dashed border-neutral-700 hover:border-blue-500 bg-neutral-800/30 hover:bg-blue-500/10 rounded-xl flex flex-col items-center justify-center cursor-pointer transition-all z-10 hover:scale-105 active:scale-95"
-            style={{ 
-                left: `${totalDuration * 40 + 10}px`,
-                transition: dragState?.active ? 'none' : 'left 0.3s ease'
-            }}
-          >
-             <div className="w-8 h-8 rounded-full bg-neutral-700 group-hover:bg-blue-500 flex items-center justify-center transition-colors mb-2">
-                <Plus className="w-5 h-5 text-neutral-400 group-hover:text-white" strokeWidth={3} />
-             </div>
-             <span className="text-[10px] font-medium text-neutral-500 group-hover:text-blue-300">Add Media</span>
-             <input type="file" accept="video/*,image/*" className="hidden" onChange={onAddMedia} />
-          </label>
-        </div>
-        
-        {/* Time markers Row */}
-        <div className="relative mt-2 h-6 border-t border-neutral-800/50 pt-1" style={{ width: `${(endMarker + 10) * 40}px` }}>
-           {markers.map((time) => (
-              <div 
-                  key={time} 
-                  className="absolute top-0 flex flex-col items-center"
-                  style={{ left: `${time * 40}px`, transform: 'translateX(-50%)' }}
-              >
-                  {/* Tick mark */}
-                  <div className="h-1.5 w-px bg-neutral-600 mb-1"></div>
-                  {/* Label */}
-                  <span className="text-[10px] text-neutral-500 font-mono select-none">
-                      {formatTime(time)}
-                  </span>
-              </div>
-           ))}
+            ))}
+            </div>
         </div>
       </div>
     </div>

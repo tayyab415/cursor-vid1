@@ -1,12 +1,20 @@
 export interface Clip {
   id: string;
   title: string;
-  duration: number; // in seconds
+  duration: number; // in seconds (Timeline duration)
   startTime: number; // Where it sits on the timeline
   sourceStartTime: number; // Where it starts in the original video file
   type?: 'video' | 'image';
   sourceUrl?: string;
   totalDuration?: number; // The full length of the source media file (if applicable)
+  trackId: number; // 0 is bottom, higher numbers are stacked on top
+  transform?: {
+    x: number; // percentage relative to container width (0 is center)
+    y: number; // percentage relative to container height (0 is center)
+    scale: number; // 1 is 100%
+    rotation: number; // degrees
+  };
+  speed?: number; // Playback speed multiplier (default 1)
 }
 
 export interface AnalysisResult {
