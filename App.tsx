@@ -15,7 +15,7 @@ const INITIAL_CLIPS: Clip[] = [
 
 const DEFAULT_TEXT_STYLE = {
     fontFamily: 'Plus Jakarta Sans',
-    fontSize: 48,
+    fontSize: 10, // Updated default to 10 as requested
     isBold: true,
     isItalic: false,
     isUnderline: false,
@@ -569,7 +569,50 @@ export default function App() {
   const handleCaptureFrame = async (target: 'start' | 'end') => { const base64 = await captureCurrentFrame(); if (base64) { if (target === 'start') setVeoStartImg(base64); else setVeoEndImg(base64); } else { alert("Could not capture frame. Ensure content is visible."); } };
   const handleGenerate = async () => { if ((genTab !== 'video' && !genPrompt.trim()) || mediaModalTrackId === null) return; if (genTab === 'video' && !genPrompt.trim() && !veoStartImg) return; setIsGenerating(true); try { const trackId = mediaModalTrackId; const trackClips = clips.filter(c => c.trackId === trackId); const trackEndTime = trackClips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0); let newClip: Clip; if (genTab === 'image') { const base64Image = await generateImage(genPrompt, imgModel, imgAspect); newClip = { id: crypto.randomUUID(), title: `Img: ${genPrompt.slice(0, 10)}...`, startTime: trackEndTime, sourceStartTime: 0, type: 'image', sourceUrl: base64Image, trackId: trackId, duration: 3, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1 }; } else if (genTab === 'video') { const videoUrl = await generateVideo(genPrompt, vidModel, vidAspect, vidResolution, parseInt(vidDuration), veoStartImg, veoEndImg); const tempVideo = document.createElement('video'); tempVideo.src = videoUrl; await new Promise(r => { tempVideo.onloadedmetadata = r; tempVideo.onerror = r; }); newClip = { id: crypto.randomUUID(), title: `Veo: ${genPrompt ? genPrompt.slice(0, 10) : 'Img2Vid'}...`, startTime: trackEndTime, sourceStartTime: 0, type: 'video', sourceUrl: videoUrl, trackId: trackId, duration: tempVideo.duration || 5, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1 }; } else { const wavUrl = await generateSpeech(genPrompt, audioVoice); const tempAudio = document.createElement('audio'); tempAudio.src = wavUrl; await new Promise(r => { tempAudio.onloadedmetadata = r; tempAudio.onerror = r; }); newClip = { id: crypto.randomUUID(), title: `TTS: ${genPrompt.slice(0, 10)}...`, startTime: trackEndTime, sourceStartTime: 0, type: 'audio', sourceUrl: wavUrl, trackId: trackId, duration: tempAudio.duration || 3, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1 }; } setClipsWithHistory([...clips, newClip]); setMessages(prev => [...prev, { role: 'system', text: `✨ Generated ${genTab} for Track ${trackId + 1}` }]); setMediaModalTrackId(null); } catch (e: any) { console.error(e); setMessages(prev => [...prev, { role: 'system', text: `❌ Generation Error: ${e.message}` }]); } finally { setIsGenerating(false); } };
   const handleSeek = (time: number) => { const newTime = Math.max(0, time); setCurrentTime(newTime); const visibleClips = clips.filter(c => newTime >= c.startTime && newTime < c.startTime + c.duration); visibleClips.forEach(clip => { if ((clip.type === 'video' || clip.type === 'audio') && mediaRefs.current[clip.id]) { const el = mediaRefs.current[clip.id]; if (el) { const speed = clip.speed || 1; const offsetInClip = newTime - clip.startTime; el.currentTime = clip.sourceStartTime + (offsetInClip * speed); } } }); };
-  const handleAddMedia = async (event: React.ChangeEvent<HTMLInputElement>) => { const trackId = mediaModalTrackId; if (trackId === null || !event.target.files?.length) return; const files = Array.from(event.target.files); const trackClips = clips.filter(c => c.trackId === trackId); let currentTrackEndTime = trackClips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0); const newClips: Clip[] = []; let firstVideoSet = false; for (const file of files) { const isImage = file.type.startsWith('image/'); const isVideo = file.type.startsWith('video/'); const isAudio = file.type.startsWith('audio/'); if (!isImage && !isVideo && !isAudio) continue; const url = URL.createObjectURL(file); const duration = await getMediaDuration(file); if (isVideo && !videoFile && !firstVideoSet) { setVideoFile(file); setVideoUrl(url); setHasAnalyzed(false); firstVideoSet = true; } newClips.push({ id: crypto.randomUUID(), title: file.name, startTime: currentTrackEndTime, sourceStartTime: 0, sourceUrl: url, trackId: trackId, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1, type: isImage ? 'image' : (isAudio ? 'audio' : 'video'), duration: duration, totalDuration: (isVideo || isAudio) ? duration : undefined }); currentTrackEndTime += duration; } if (newClips.length > 0) { setClipsWithHistory([...clips, ...newClips]); setMessages(prev => [...prev, { role: 'system', text: `Added ${newClips.length} items to Track ${trackId + 1}` }]); } setMediaModalTrackId(null); if (fileInputRef.current) fileInputRef.current.value = ''; };
+  const handleAddMedia = async (event: React.ChangeEvent<HTMLInputElement>) => { 
+    const trackId = mediaModalTrackId; 
+    if (trackId === null || !event.target.files?.length) return; 
+    const files = Array.from(event.target.files) as File[]; 
+    const trackClips = clips.filter(c => c.trackId === trackId); 
+    let currentTrackEndTime = trackClips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0); 
+    const newClips: Clip[] = []; 
+    let firstVideoSet = false; 
+    for (const file of files) { 
+        const isImage = file.type.startsWith('image/'); 
+        const isVideo = file.type.startsWith('video/'); 
+        const isAudio = file.type.startsWith('audio/'); 
+        if (!isImage && !isVideo && !isAudio) continue; 
+        const url = URL.createObjectURL(file); 
+        const duration = await getMediaDuration(file); 
+        if (isVideo && !videoFile && !firstVideoSet) { 
+            setVideoFile(file); 
+            setVideoUrl(url); 
+            setHasAnalyzed(false); 
+            firstVideoSet = true; 
+        } 
+        newClips.push({ 
+            id: crypto.randomUUID(), 
+            title: file.name, 
+            startTime: currentTrackEndTime, 
+            sourceStartTime: 0, 
+            sourceUrl: url, 
+            trackId: trackId, 
+            transform: { x: 0, y: 0, scale: 1, rotation: 0 }, 
+            speed: 1, 
+            volume: 1, 
+            type: isImage ? 'image' : (isAudio ? 'audio' : 'video'), 
+            duration: duration, 
+            totalDuration: (isVideo || isAudio) ? duration : undefined 
+        }); 
+        currentTrackEndTime += duration; 
+    } 
+    if (newClips.length > 0) { 
+        setClipsWithHistory([...clips, ...newClips]); 
+        setMessages(prev => [...prev, { role: 'system', text: `Added ${newClips.length} items to Track ${trackId + 1}` }]); 
+    } 
+    setMediaModalTrackId(null); 
+    if (fileInputRef.current) fileInputRef.current.value = ''; 
+  };
   const getMediaDuration = (file: File): Promise<number> => { return new Promise((resolve) => { if (file.type.startsWith('image/')) { resolve(3); return; } const element = file.type.startsWith('audio/') ? document.createElement('audio') : document.createElement('video'); element.preload = 'metadata'; element.onloadedmetadata = () => { resolve(element.duration || 5); }; element.onerror = () => { resolve(5); }; element.src = URL.createObjectURL(file); }); };
   const formatTime = (seconds: number) => { const m = Math.floor(seconds / 60); const s = Math.floor(seconds % 60); const ms = Math.floor((seconds % 1) * 100); return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`; };
   const togglePlay = () => setIsPlaying(!isPlaying);
@@ -616,35 +659,69 @@ export default function App() {
   // Reused Controls for Caption Modal
   const TextControls = ({ values, onChange }: { values: any, onChange: (u: any) => void }) => (
       <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-2">
-              <div className="col-span-2">
-                  <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Font Size</label>
+          <div className="grid grid-cols-2 gap-4">
+              {/* Font Family Selector */}
+              <div className="col-span-2 sm:col-span-1">
+                  <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Font</label>
+                  <select 
+                      value={values.fontFamily || 'Plus Jakarta Sans'}
+                      onChange={(e) => onChange({ fontFamily: e.target.value })}
+                      className="w-full bg-neutral-900 border border-neutral-700 rounded text-xs text-white py-1.5 px-2 focus:outline-none focus:border-blue-500"
+                  >
+                      <option value="Plus Jakarta Sans">Plus Jakarta Sans</option>
+                      <option value="Google Sans Flex">Google Sans Flex</option>
+                      <option value="Helvetica">Helvetica</option>
+                      <option value="Arial">Arial</option>
+                      <option value="Times New Roman">Times New Roman</option>
+                      <option value="Courier New">Courier New</option>
+                  </select>
+              </div>
+
+              {/* Font Size with Slider and Manual Input */}
+              <div className="col-span-2 sm:col-span-1">
+                  <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Size</label>
                   <div className="flex items-center gap-2">
-                      <input type="range" min="12" max="200" value={values.fontSize || 48} onChange={(e) => onChange({ fontSize: parseInt(e.target.value) })} className="flex-1 h-1.5 bg-neutral-600 rounded-lg appearance-none cursor-pointer accent-blue-500" />
-                      <span className="text-xs w-8 text-right text-neutral-400">{values.fontSize || 48}</span>
+                      <input 
+                          type="range" 
+                          min="6" 
+                          max="18" 
+                          step="1"
+                          value={Math.min(Math.max(values.fontSize || 10, 6), 18)} 
+                          onChange={(e) => onChange({ fontSize: parseInt(e.target.value) })} 
+                          className="flex-1 h-1.5 bg-neutral-600 rounded-lg appearance-none cursor-pointer accent-blue-500" 
+                      />
+                      <input 
+                          type="number" 
+                          min="1"
+                          value={values.fontSize || 10} 
+                          onChange={(e) => onChange({ fontSize: parseInt(e.target.value) || 10 })}
+                          className="w-12 bg-neutral-900 border border-neutral-700 rounded text-xs text-center py-0.5 text-white focus:outline-none focus:border-blue-500"
+                      />
                   </div>
               </div>
           </div>
+
           <div>
               <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Style</label>
-              <div className="flex bg-neutral-900 rounded p-1 gap-1">
-                  <button onClick={() => onChange({ isBold: !values.isBold })} className={`flex-1 p-1.5 rounded flex justify-center ${values.isBold ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Bold size={14} /></button>
-                  <button onClick={() => onChange({ isItalic: !values.isItalic })} className={`flex-1 p-1.5 rounded flex justify-center ${values.isItalic ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Italic size={14} /></button>
-                  <button onClick={() => onChange({ isUnderline: !values.isUnderline })} className={`flex-1 p-1.5 rounded flex justify-center ${values.isUnderline ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Underline size={14} /></button>
+              <div className="flex bg-neutral-900 rounded p-1 gap-1 border border-neutral-800">
+                  <button onClick={() => onChange({ isBold: !values.isBold })} className={`flex-1 p-1.5 rounded flex justify-center transition-colors ${values.isBold ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Bold size={14} /></button>
+                  <button onClick={() => onChange({ isItalic: !values.isItalic })} className={`flex-1 p-1.5 rounded flex justify-center transition-colors ${values.isItalic ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Italic size={14} /></button>
+                  <button onClick={() => onChange({ isUnderline: !values.isUnderline })} className={`flex-1 p-1.5 rounded flex justify-center transition-colors ${values.isUnderline ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Underline size={14} /></button>
               </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
               <div>
                   <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Text Color</label>
-                  <div className="flex items-center gap-2">
-                      <input type="color" value={values.color || '#ffffff'} onChange={(e) => onChange({ color: e.target.value })} className="w-8 h-8 rounded cursor-pointer border-0 bg-transparent p-0" />
-                      <span className="text-xs text-neutral-400 uppercase">{values.color}</span>
+                  <div className="flex items-center gap-2 bg-neutral-900 p-1.5 rounded border border-neutral-800">
+                      <input type="color" value={values.color || '#ffffff'} onChange={(e) => onChange({ color: e.target.value })} className="w-6 h-6 rounded cursor-pointer border-0 bg-transparent p-0" />
+                      <span className="text-xs text-neutral-400 uppercase font-mono">{values.color}</span>
                   </div>
               </div>
               <div>
                   <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Bg Color</label>
-                  <div className="flex items-center gap-2">
-                      <input type="color" value={values.backgroundColor || '#000000'} onChange={(e) => onChange({ backgroundColor: e.target.value })} className="w-8 h-8 rounded cursor-pointer border-0 bg-transparent p-0" />
+                  <div className="flex items-center gap-2 bg-neutral-900 p-1.5 rounded border border-neutral-800">
+                      <input type="color" value={values.backgroundColor || '#000000'} onChange={(e) => onChange({ backgroundColor: e.target.value })} className="w-6 h-6 rounded cursor-pointer border-0 bg-transparent p-0" />
+                      <span className="text-xs text-neutral-400 uppercase font-mono">{values.backgroundColor}</span>
                   </div>
               </div>
           </div>
