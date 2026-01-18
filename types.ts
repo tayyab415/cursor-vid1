@@ -4,8 +4,20 @@ export interface Clip {
   duration: number; // in seconds (Timeline duration)
   startTime: number; // Where it sits on the timeline
   sourceStartTime: number; // Where it starts in the original video file
-  type?: 'video' | 'image' | 'audio';
+  type?: 'video' | 'image' | 'audio' | 'text';
   sourceUrl?: string;
+  text?: string; // For caption clips
+  textStyle?: {
+    fontFamily: string;
+    fontSize: number;
+    isBold: boolean;
+    isItalic: boolean;
+    isUnderline: boolean;
+    color: string;
+    backgroundColor: string;
+    backgroundOpacity: number;
+    align: 'left' | 'center' | 'right';
+  };
   totalDuration?: number; // The full length of the source media file (if applicable)
   trackId: number; // 0 is bottom, higher numbers are stacked on top
   transform?: {

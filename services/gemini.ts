@@ -62,6 +62,35 @@ const base64ToUint8Array = (base64: string) => {
 
 // --- API CALLS ---
 
+export const chatWithGemini = async (
+    history: { role: 'user' | 'model' | 'system', text: string }[],
+    message: string
+): Promise<string> => {
+    const ai = getAiClient();
+    const apiHistory = history
+        .filter(msg => msg.role === 'user' || msg.role === 'model')
+        .map(msg => ({
+            role: msg.role as 'user' | 'model',
+            parts: [{ text: msg.text }]
+        }));
+
+    const chat = ai.chats.create({
+        model: 'gemini-3-flash-preview',
+        history: apiHistory,
+        config: {
+            systemInstruction: "You are an intelligent video editing assistant. You help users navigate the editor, suggest creative ideas, and analyze video content.",
+        }
+    });
+
+    try {
+        const result = await chat.sendMessage({ message });
+        return result.text;
+    } catch (e: any) {
+        console.error("Chat Error:", e);
+        return "Sorry, I encountered an error communicating with the AI.";
+    }
+};
+
 export const analyzeVideoFrames = async (
   base64Frames: string[],
   prompt: string
@@ -188,48 +217,122 @@ export const generateImage = async (
 export const generateVideo = async (
     prompt: string,
     model: string = 'veo-3.1-fast-generate-preview',
-    aspectRatio: string = '16:9'
+    aspectRatio: string = '16:9',
+    resolution: string = '720p',
+    durationSeconds: number = 8,
+    startImageBase64?: string | null,
+    endImageBase64?: string | null
 ): Promise<string> => {
-    // Check for API key selection for Veo models
-    if (window.aistudio && window.aistudio.hasSelectedApiKey) {
-        const hasKey = await window.aistudio.hasSelectedApiKey();
+    // Check for API key selection logic for Veo models
+    if ((window as any).aistudio) {
+        const hasKey = await (window as any).aistudio.hasSelectedApiKey();
         if (!hasKey) {
-             await window.aistudio.openSelectKey();
-             // Re-instantiate client after selection if needed, but getAiClient pulls process.env
+             await (window as any).aistudio.openSelectKey();
+             // Race condition handling: proceed assuming success
         }
     }
 
-    const ai = getAiClient();
-    try {
-        let operation = await ai.models.generateVideos({
+    // Validation for Veo Constraints
+    if (endImageBase64 && !startImageBase64) {
+        throw new Error("Veo requires a Start Frame to be provided if an End Frame is used.");
+    }
+    
+    // Constraint enforcement for safety
+    if ((resolution === '1080p' || resolution === '4k' || startImageBase64 || endImageBase64) && durationSeconds !== 8) {
+        console.warn("Forcing duration to 8s due to resolution or reference image constraints.");
+        durationSeconds = 8;
+    }
+
+    const performGeneration = async () => {
+        const ai = getAiClient(); // Always get new client to pick up latest env vars
+        
+        // Prepare payload options
+        const options: any = {
             model: model,
-            prompt: prompt,
             config: {
                 numberOfVideos: 1,
-                resolution: '720p',
-                aspectRatio: aspectRatio === '16:9' || aspectRatio === '9:16' ? aspectRatio as any : '16:9'
+                resolution: resolution as any,
+                aspectRatio: aspectRatio === '16:9' || aspectRatio === '9:16' ? aspectRatio as any : '16:9',
+                durationSeconds: durationSeconds
             }
-        });
+        };
 
-        // Polling loop
-        while (!operation.done) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            operation = await ai.operations.getVideosOperation({ operation: operation });
+        if (prompt) options.prompt = prompt;
+
+        // Add Start Image (image)
+        if (startImageBase64) {
+            const [header, data] = startImageBase64.split(',');
+            // Extract mimetype from header (e.g., "data:image/jpeg;base64")
+            const mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
+            
+            options.image = {
+                imageBytes: data,
+                mimeType: mimeType
+            };
         }
 
-        const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-        if (!downloadLink) throw new Error("No video URI in response");
+        // Add End Image (lastFrame)
+        if (endImageBase64) {
+            const [header, data] = endImageBase64.split(',');
+            const mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
+            
+            options.config.lastFrame = {
+                imageBytes: data,
+                mimeType: mimeType
+            };
+        }
 
-        // Fetch and blobify to avoid CORS/expiration issues in simple tags
-        const apiKey = process.env.API_KEY;
-        const res = await fetch(`${downloadLink}&key=${apiKey}`);
-        const blob = await res.blob();
-        return URL.createObjectURL(blob);
+        return await ai.models.generateVideos(options);
+    };
 
-    } catch (error) {
-        console.error("Video Generation Error:", error);
-        throw error;
+    let operation;
+    try {
+        operation = await performGeneration();
+    } catch (e: any) {
+        // Handle specific error for missing paid key permissions
+        if (e.message?.includes("Requested entity was not found") && (window as any).aistudio) {
+             console.warn("API Key issue detected. Prompting for selection again.");
+             await (window as any).aistudio.openSelectKey();
+             // Retry once
+             operation = await performGeneration();
+        } else {
+            throw e;
+        }
     }
+
+    if (!operation) {
+        throw new Error("Failed to initialize video generation operation.");
+    }
+
+    // Polling loop
+    while (!operation.done) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        const ai = getAiClient();
+        // Use the full operation object for polling, per SDK requirements
+        operation = await ai.operations.getVideosOperation({ operation: operation });
+    }
+
+    // Check for explicit API error (e.g., safety block, invalid argument)
+    if (operation.error) {
+        console.error("Veo Operation Error:", operation.error);
+        throw new Error(`Video generation failed: ${operation.error.message || "Unknown error"} (Code: ${operation.error.code})`);
+    }
+
+    // Attempt to retrieve response from standard response or result property
+    const videoResponse = operation.response || (operation as any).result;
+    const downloadLink = videoResponse?.generatedVideos?.[0]?.video?.uri;
+    
+    if (!downloadLink) {
+        console.error("Veo Operation Dump:", JSON.stringify(operation, null, 2));
+        throw new Error("No video URI in response. The generation may have been blocked or failed silently.");
+    }
+
+    // Fetch and blobify to avoid CORS/expiration issues in simple tags
+    const apiKey = process.env.API_KEY;
+    const res = await fetch(`${downloadLink}&key=${apiKey}`);
+    if (!res.ok) throw new Error(`Failed to download video: ${res.statusText}`);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
 };
 
 export const generateSpeech = async (
@@ -261,6 +364,51 @@ export const generateSpeech = async (
         return wavUrl;
     } catch (error) {
         console.error("Speech Generation Error:", error);
+        throw error;
+    }
+};
+
+export const generateSubtitles = async (
+    audioBase64: string,
+    mimeType: string = 'audio/wav'
+): Promise<{start: number, end: number, text: string}[]> => {
+    const ai = getAiClient();
+    
+    // We use gemini-2.5-flash for strong multimodal (audio/video) understanding
+    const model = "gemini-2.5-flash"; 
+
+    const prompt = `
+    Listen to the audio/video and generate precise subtitles.
+    Return ONLY a JSON array with objects containing 'start' (number in seconds), 'end' (number in seconds), and 'text' (string).
+    Do not include markdown formatting.
+    Example: [{"start": 0, "end": 2.5, "text": "Hello world"}, {"start": 2.5, "end": 4, "text": "This is a video."}]
+    `;
+
+    try {
+        const response = await ai.models.generateContent({
+            model: model,
+            contents: {
+                parts: [
+                    {
+                        inlineData: {
+                            mimeType: mimeType,
+                            data: audioBase64
+                        }
+                    },
+                    { text: prompt }
+                ]
+            },
+            config: {
+                responseMimeType: "application/json",
+            }
+        });
+
+        const text = response.text || "[]";
+        // Clean up any potential markdown code blocks if the model ignores the instruction
+        const cleanText = text.replace(/```json|```/g, '').trim();
+        return JSON.parse(cleanText);
+    } catch (error) {
+        console.error("Subtitle Generation Error:", error);
         throw error;
     }
 };
