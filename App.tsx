@@ -431,17 +431,8 @@ export default function App() {
         const clipToDelete = curr.present.find(c => c.id === id);
         if (!clipToDelete) return curr;
         const remainingClips = curr.present.filter(c => c.id !== id);
-        const trackClips = remainingClips.filter(c => c.trackId === clipToDelete.trackId);
-        trackClips.sort((a, b) => a.startTime - b.startTime);
-        let accumulatedTime = 0;
-        const normalizedTrackClips = trackClips.map(clip => {
-            const updated = { ...clip, startTime: accumulatedTime };
-            accumulatedTime += clip.duration;
-            return updated;
-        });
-        const otherClips = remainingClips.filter(c => c.trackId !== clipToDelete.trackId);
-        const finalClips = [...otherClips, ...normalizedTrackClips];
-        return { past: [...curr.past, curr.present], present: finalClips, future: [] };
+        // Removed magnetic logic here. Just delete.
+        return { past: [...curr.past, curr.present], present: remainingClips, future: [] };
     });
     if (selectedClipIds.includes(id)) setSelectedClipIds(prev => prev.filter(i => i !== id));
   }, [selectedClipIds]);
@@ -455,23 +446,23 @@ export default function App() {
       setShowSpeedMenu(false); setIsCustomSpeed(false); setShowVolumeMenu(false); setShowTextStyleMenu(false);
   };
 
-  // --- REORDER/SPLIT/RESIZE/ETC Handlers (Unchanged Logic, mostly) ---
-  const handleClipReorder = (sourceId: string, targetId: string | null, targetTrackId: number) => { /* ...Same as before... */
+  // --- REORDER/SPLIT/RESIZE/ETC Handlers ---
+  const handleClipReorder = (sourceId: string, newStartTime: number, targetTrackId: number, commit: boolean = true) => {
       setHistory(curr => {
-          const sourceClip = curr.present.find(c => c.id === sourceId); if (!sourceClip) return curr;
+          const sourceClip = curr.present.find(c => c.id === sourceId); 
+          if (!sourceClip) return curr;
+          
+          const updatedSource = { ...sourceClip, trackId: targetTrackId, startTime: newStartTime };
           const remaining = curr.present.filter(c => c.id !== sourceId);
-          const updatedSource = { ...sourceClip, trackId: targetTrackId };
-          const targetTrackClips = remaining.filter(c => c.trackId === targetTrackId); targetTrackClips.sort((a, b) => a.startTime - b.startTime);
-          let newTrackClips: Clip[] = [];
-          if (targetId) { const insertIndex = targetTrackClips.findIndex(c => c.id === targetId); if (insertIndex !== -1) { newTrackClips = [...targetTrackClips.slice(0, insertIndex), updatedSource, ...targetTrackClips.slice(insertIndex)]; } else { newTrackClips = [...targetTrackClips, updatedSource]; } } else { newTrackClips = [...targetTrackClips, updatedSource]; }
-          let currentTime = 0;
-          const processedTargetTrack = newTrackClips.map(c => { const updated = { ...c, startTime: currentTime }; currentTime += c.duration; return updated; });
-          const sourceTrackId = sourceClip.trackId; let processedSourceTrack: Clip[] = [];
-          if (sourceTrackId !== targetTrackId) { const sourceTrackClips = remaining.filter(c => c.trackId === sourceTrackId); sourceTrackClips.sort((a, b) => a.startTime - b.startTime); let sTime = 0; processedSourceTrack = sourceTrackClips.map(c => { const updated = { ...c, startTime: sTime }; sTime += c.duration; return updated; }); }
-          const otherClips = remaining.filter(c => c.trackId !== targetTrackId && c.trackId !== sourceTrackId);
-          return { past: [...curr.past, curr.present], present: [...otherClips, ...processedTargetTrack, ...processedSourceTrack], future: [] };
+          
+          // No sorting or magnetizing. Just update position.
+          const finalClips = [...remaining, updatedSource];
+          
+          if (!commit) return { ...curr, present: finalClips };
+          return { past: [...curr.past, curr.present], present: finalClips, future: [] };
       });
   };
+
   const handleSplitClip = () => {
       // Prioritize primary selected clip or finding one at playhead
       const clipId = selectedClipIds[selectedClipIds.length - 1];
@@ -489,27 +480,53 @@ export default function App() {
           return { past: [...curr.past, curr.present], present: newClips, future: [] };
       });
   };
+
   const handleClipResize = (id: string, newDuration: number, trimMode: 'start' | 'end', commit: boolean) => {
      setHistory(curr => {
         const clip = curr.present.find(c => c.id === id); if (!clip) return curr;
-        const speed = clip.speed || 1; let updated = { ...clip };
-        if (trimMode === 'end') { if (clip.type === 'video' && clip.totalDuration) { const maxDur = (clip.totalDuration - clip.sourceStartTime) / speed; updated.duration = Math.min(newDuration, maxDur); } else { updated.duration = newDuration; } } 
-        else { const diffSeconds = clip.duration - newDuration; const sourceDiff = diffSeconds * speed; let newSourceStart = clip.sourceStartTime + sourceDiff; if (newSourceStart < 0) { newSourceStart = 0; updated.duration = clip.duration + (clip.sourceStartTime / speed); updated.sourceStartTime = 0; } else { updated.sourceStartTime = newSourceStart; updated.duration = newDuration; } }
+        const speed = clip.speed || 1; 
+        let updated = { ...clip };
+
+        if (trimMode === 'end') { 
+            if (clip.type === 'video' && clip.totalDuration) { 
+                const maxDur = (clip.totalDuration - clip.sourceStartTime) / speed; 
+                updated.duration = Math.min(newDuration, maxDur); 
+            } else { 
+                updated.duration = newDuration; 
+            } 
+        } else { 
+            // Handle Start Trim logic without magnetization
+            const durationDiff = clip.duration - newDuration; // + if shrinking, - if growing
+            const proposedSourceStart = clip.sourceStartTime + (durationDiff * speed);
+            
+            if (proposedSourceStart < 0) {
+                // Hit file start
+                updated.sourceStartTime = 0;
+                const maxExtension = clip.sourceStartTime / speed;
+                updated.duration = clip.duration + maxExtension;
+                updated.startTime = clip.startTime - maxExtension;
+            } else {
+                updated.sourceStartTime = proposedSourceStart;
+                updated.duration = newDuration;
+                updated.startTime = clip.startTime + durationDiff;
+            }
+        }
+        
+        // Update only the specific clip, remove all magnetic re-layout logic
         const newClips = curr.present.map(c => c.id === id ? updated : c);
-        const trackClips = newClips.filter(c => c.trackId === clip.trackId).sort((a,b) => a.startTime - b.startTime);
-        let time = 0; const magnetizedTrack = trackClips.map(c => { const m = { ...c, startTime: time }; time += c.duration; return m; });
-        const final = [...newClips.filter(c => c.trackId !== clip.trackId), ...magnetizedTrack];
-        if (!commit) return { ...curr, present: final };
-        return { past: [...curr.past, curr.present], present: final, future: [] };
+        
+        if (!commit) return { ...curr, present: newClips };
+        return { past: [...curr.past, curr.present], present: newClips, future: [] };
      });
   };
+
+  // ... (Rest of component functions handleCanvasClick, handleGenerateCaptions, etc. remain unchanged) ...
   const handleCanvasClick = (e: React.MouseEvent) => {
       if (e.target === containerRef.current || e.target === e.currentTarget) {
           setSelectedClipIds([]); setShowSpeedMenu(false); setIsCustomSpeed(false); setShowVolumeMenu(false); setShowTextStyleMenu(false);
       }
   };
 
-  // --- CAPTION GENERATION ---
   const handleGenerateCaptions = async () => {
       let targetFile: File | Blob | null = videoFile;
       if (!targetFile) {
@@ -533,7 +550,7 @@ export default function App() {
               sourceStartTime: 0,
               type: 'text' as const,
               text: sub.text,
-              textStyle: { ...captionStyle }, // Apply configured style from modal
+              textStyle: { ...captionStyle }, 
               trackId: subtitleTrackId,
               duration: sub.end - sub.start,
               transform: { x: 0, y: 0.35, scale: 1, rotation: 0 },
@@ -548,8 +565,6 @@ export default function App() {
 
   const availableVideo = videoFile || clips.find(c => c.type === 'video');
   const visibleClips = clips.filter(c => currentTime >= c.startTime && currentTime < c.startTime + c.duration).sort((a, b) => a.trackId - b.trackId); 
-  
-  // Selection Logic for UI
   const selectedClips = clips.filter(c => selectedClipIds.includes(c.id));
   const primarySelectedClip = selectedClips.length > 0 ? selectedClips[selectedClips.length - 1] : null;
   const isSelectedClipVisible = primarySelectedClip && visibleClips.some(vc => vc.id === primarySelectedClip.id);
@@ -557,7 +572,6 @@ export default function App() {
   const allSelectedAreText = selectedClips.length > 0 && selectedClips.every(c => c.type === 'text');
   const allSelectedAreMedia = selectedClips.length > 0 && selectedClips.every(c => c.type === 'video' || c.type === 'audio');
 
-  // ... (Upload, Trans, etc handlers unchanged) ...
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (file) { setVideoFile(file); const url = URL.createObjectURL(file); setVideoUrl(url); setMessages(prev => [...prev, { role: 'model', text: `Loaded **${file.name}**. Click "Analyze Video" to process it with **Gemini 3 Pro**.` }]); setCurrentTime(0); setIsPlaying(false); setHasAnalyzed(false); } };
   const handleTransitionRequest = async (clipA: Clip, clipB: Clip) => { let startFrame = null; if (clipA.type === 'image' && clipA.sourceUrl) startFrame = clipA.sourceUrl; else if (clipA.type === 'video' && clipA.sourceUrl) { const endTime = clipA.sourceStartTime + (clipA.duration * (clipA.speed || 1)); try { startFrame = await captureFrameFromVideoUrl(clipA.sourceUrl, endTime); } catch (e) { console.error(e); } } let endFrame = null; if (clipB.type === 'image' && clipB.sourceUrl) endFrame = clipB.sourceUrl; else if (clipB.type === 'video' && clipB.sourceUrl) { const startTime = clipB.sourceStartTime; try { endFrame = await captureFrameFromVideoUrl(clipB.sourceUrl, startTime); } catch (e) { console.error(e); } } if (startFrame && endFrame) { setTransitionModal({ active: true, clipA, clipB, startFrame, endFrame, prompt: "Smooth cinematic transition between these two shots", model: 'veo-3.1-fast-generate-preview', resolution: '720p', duration: '8' }); } else { setMessages(prev => [...prev, { role: 'system', text: `❌ Could not extract frames for transition.` }]); } };
   const handleGenerateTransition = async () => { if (!transitionModal.clipA || !transitionModal.clipB || !transitionModal.startFrame || !transitionModal.endFrame) return; setIsGenerating(true); try { const videoUrl = await generateVideo(transitionModal.prompt, transitionModal.model, '16:9', transitionModal.resolution, 8, transitionModal.startFrame, transitionModal.endFrame); const tempVideo = document.createElement('video'); tempVideo.src = videoUrl; await new Promise(r => { tempVideo.onloadedmetadata = r; tempVideo.onerror = r; }); const duration = tempVideo.duration || 8; const transitionClip: Clip = { id: crypto.randomUUID(), title: `Transition`, startTime: transitionModal.clipA.startTime + transitionModal.clipA.duration, sourceStartTime: 0, type: 'video', sourceUrl: videoUrl, trackId: transitionModal.clipA.trackId, duration: duration, totalDuration: duration, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1 }; const currentClips = clips; const trackId = transitionModal.clipA.trackId; const insertionTime = transitionClip.startTime; const trackClips = currentClips.filter(c => c.trackId === trackId); const laterClips = trackClips.filter(c => c.startTime >= insertionTime); const shiftedLaterClips = laterClips.map(c => ({ ...c, startTime: c.startTime + duration })); const otherTracks = currentClips.filter(c => c.trackId !== trackId); const earlierClips = trackClips.filter(c => c.startTime < insertionTime); const finalClips = [...otherTracks, ...earlierClips, transitionClip, ...shiftedLaterClips]; setClipsWithHistory(finalClips); setMessages(prev => [...prev, { role: 'system', text: `✨ Generated transition between "${transitionModal.clipA?.title}" and "${transitionModal.clipB?.title}"` }]); setTransitionModal(prev => ({ ...prev, active: false })); } catch (e: any) { console.error(e); setMessages(prev => [...prev, { role: 'system', text: `❌ Transition Error: ${e.message}` }]); } finally { setIsGenerating(false); } };
@@ -569,175 +583,33 @@ export default function App() {
   const handleCaptureFrame = async (target: 'start' | 'end') => { const base64 = await captureCurrentFrame(); if (base64) { if (target === 'start') setVeoStartImg(base64); else setVeoEndImg(base64); } else { alert("Could not capture frame. Ensure content is visible."); } };
   const handleGenerate = async () => { if ((genTab !== 'video' && !genPrompt.trim()) || mediaModalTrackId === null) return; if (genTab === 'video' && !genPrompt.trim() && !veoStartImg) return; setIsGenerating(true); try { const trackId = mediaModalTrackId; const trackClips = clips.filter(c => c.trackId === trackId); const trackEndTime = trackClips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0); let newClip: Clip; if (genTab === 'image') { const base64Image = await generateImage(genPrompt, imgModel, imgAspect); newClip = { id: crypto.randomUUID(), title: `Img: ${genPrompt.slice(0, 10)}...`, startTime: trackEndTime, sourceStartTime: 0, type: 'image', sourceUrl: base64Image, trackId: trackId, duration: 3, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1 }; } else if (genTab === 'video') { const videoUrl = await generateVideo(genPrompt, vidModel, vidAspect, vidResolution, parseInt(vidDuration), veoStartImg, veoEndImg); const tempVideo = document.createElement('video'); tempVideo.src = videoUrl; await new Promise(r => { tempVideo.onloadedmetadata = r; tempVideo.onerror = r; }); newClip = { id: crypto.randomUUID(), title: `Veo: ${genPrompt ? genPrompt.slice(0, 10) : 'Img2Vid'}...`, startTime: trackEndTime, sourceStartTime: 0, type: 'video', sourceUrl: videoUrl, trackId: trackId, duration: tempVideo.duration || 5, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1 }; } else { const wavUrl = await generateSpeech(genPrompt, audioVoice); const tempAudio = document.createElement('audio'); tempAudio.src = wavUrl; await new Promise(r => { tempAudio.onloadedmetadata = r; tempAudio.onerror = r; }); newClip = { id: crypto.randomUUID(), title: `TTS: ${genPrompt.slice(0, 10)}...`, startTime: trackEndTime, sourceStartTime: 0, type: 'audio', sourceUrl: wavUrl, trackId: trackId, duration: tempAudio.duration || 3, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1 }; } setClipsWithHistory([...clips, newClip]); setMessages(prev => [...prev, { role: 'system', text: `✨ Generated ${genTab} for Track ${trackId + 1}` }]); setMediaModalTrackId(null); } catch (e: any) { console.error(e); setMessages(prev => [...prev, { role: 'system', text: `❌ Generation Error: ${e.message}` }]); } finally { setIsGenerating(false); } };
   const handleSeek = (time: number) => { const newTime = Math.max(0, time); setCurrentTime(newTime); const visibleClips = clips.filter(c => newTime >= c.startTime && newTime < c.startTime + c.duration); visibleClips.forEach(clip => { if ((clip.type === 'video' || clip.type === 'audio') && mediaRefs.current[clip.id]) { const el = mediaRefs.current[clip.id]; if (el) { const speed = clip.speed || 1; const offsetInClip = newTime - clip.startTime; el.currentTime = clip.sourceStartTime + (offsetInClip * speed); } } }); };
-  const handleAddMedia = async (event: React.ChangeEvent<HTMLInputElement>) => { 
-    const trackId = mediaModalTrackId; 
-    if (trackId === null || !event.target.files?.length) return; 
-    const files = Array.from(event.target.files) as File[]; 
-    const trackClips = clips.filter(c => c.trackId === trackId); 
-    let currentTrackEndTime = trackClips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0); 
-    const newClips: Clip[] = []; 
-    let firstVideoSet = false; 
-    for (const file of files) { 
-        const isImage = file.type.startsWith('image/'); 
-        const isVideo = file.type.startsWith('video/'); 
-        const isAudio = file.type.startsWith('audio/'); 
-        if (!isImage && !isVideo && !isAudio) continue; 
-        const url = URL.createObjectURL(file); 
-        const duration = await getMediaDuration(file); 
-        if (isVideo && !videoFile && !firstVideoSet) { 
-            setVideoFile(file); 
-            setVideoUrl(url); 
-            setHasAnalyzed(false); 
-            firstVideoSet = true; 
-        } 
-        newClips.push({ 
-            id: crypto.randomUUID(), 
-            title: file.name, 
-            startTime: currentTrackEndTime, 
-            sourceStartTime: 0, 
-            sourceUrl: url, 
-            trackId: trackId, 
-            transform: { x: 0, y: 0, scale: 1, rotation: 0 }, 
-            speed: 1, 
-            volume: 1, 
-            type: isImage ? 'image' : (isAudio ? 'audio' : 'video'), 
-            duration: duration, 
-            totalDuration: (isVideo || isAudio) ? duration : undefined 
-        }); 
-        currentTrackEndTime += duration; 
-    } 
-    if (newClips.length > 0) { 
-        setClipsWithHistory([...clips, ...newClips]); 
-        setMessages(prev => [...prev, { role: 'system', text: `Added ${newClips.length} items to Track ${trackId + 1}` }]); 
-    } 
-    setMediaModalTrackId(null); 
-    if (fileInputRef.current) fileInputRef.current.value = ''; 
-  };
+  const handleAddMedia = async (event: React.ChangeEvent<HTMLInputElement>) => { const trackId = mediaModalTrackId; if (trackId === null || !event.target.files?.length) return; const files = Array.from(event.target.files) as File[]; const trackClips = clips.filter(c => c.trackId === trackId); let currentTrackEndTime = trackClips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0); const newClips: Clip[] = []; let firstVideoSet = false; for (const file of files) { const isImage = file.type.startsWith('image/'); const isVideo = file.type.startsWith('video/'); const isAudio = file.type.startsWith('audio/'); if (!isImage && !isVideo && !isAudio) continue; const url = URL.createObjectURL(file); const duration = await getMediaDuration(file); if (isVideo && !videoFile && !firstVideoSet) { setVideoFile(file); setVideoUrl(url); setHasAnalyzed(false); firstVideoSet = true; } newClips.push({ id: crypto.randomUUID(), title: file.name, startTime: currentTrackEndTime, sourceStartTime: 0, sourceUrl: url, trackId: trackId, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1, type: isImage ? 'image' : (isAudio ? 'audio' : 'video'), duration: duration, totalDuration: (isVideo || isAudio) ? duration : undefined }); currentTrackEndTime += duration; } if (newClips.length > 0) { setClipsWithHistory([...clips, ...newClips]); setMessages(prev => [...prev, { role: 'system', text: `Added ${newClips.length} items to Track ${trackId + 1}` }]); } setMediaModalTrackId(null); if (fileInputRef.current) fileInputRef.current.value = ''; };
   const getMediaDuration = (file: File): Promise<number> => { return new Promise((resolve) => { if (file.type.startsWith('image/')) { resolve(3); return; } const element = file.type.startsWith('audio/') ? document.createElement('audio') : document.createElement('video'); element.preload = 'metadata'; element.onloadedmetadata = () => { resolve(element.duration || 5); }; element.onerror = () => { resolve(5); }; element.src = URL.createObjectURL(file); }); };
   const formatTime = (seconds: number) => { const m = Math.floor(seconds / 60); const s = Math.floor(seconds % 60); const ms = Math.floor((seconds % 1) * 100); return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`; };
   const togglePlay = () => setIsPlaying(!isPlaying);
 
-  // Veo Mode Indicator Logic
-  const getVeoMode = () => {
-    if (veoStartImg && veoEndImg) return { label: 'Interpolation', color: 'border-purple-500/50 text-purple-300 bg-purple-500/10' };
-    if (veoStartImg) return { label: 'Image-to-Video', color: 'border-blue-500/50 text-blue-300 bg-blue-500/10' };
-    return { label: 'Text-to-Video', color: 'border-neutral-700 text-neutral-400 bg-neutral-800' };
-  };
+  const getVeoMode = () => { if (veoStartImg && veoEndImg) return { label: 'Interpolation', color: 'border-purple-500/50 text-purple-300 bg-purple-500/10' }; if (veoStartImg) return { label: 'Image-to-Video', color: 'border-blue-500/50 text-blue-300 bg-blue-500/10' }; return { label: 'Text-to-Video', color: 'border-neutral-700 text-neutral-400 bg-neutral-800' }; };
   const { label: veoModeLabel, color: veoModeColor } = getVeoMode();
 
-  const handleSendMessage = async () => {
-    if (!inputText.trim()) return;
-    
-    const userMessage: ChatMessage = { role: 'user', text: inputText };
-    setMessages(prev => [...prev, userMessage]);
-    setInputText('');
-    setIsAnalyzing(true);
-
-    try {
-        if (videoFile && (inputText.toLowerCase().includes('analyze') || inputText.toLowerCase().includes('review'))) {
-            setMessages(prev => [...prev, { role: 'system', text: "Analyzing video frames... (this uses Gemini 3 Pro Vision)" }]);
-            const frames = await extractFramesFromVideo(videoFile, 10);
-            const result = await analyzeVideoFrames(frames, inputText);
-            setMessages(prev => [...prev, { role: 'model', text: result }]);
-        } else if (inputText.toLowerCase().includes('suggest') || inputText.toLowerCase().includes('edit')) {
-            setMessages(prev => [...prev, { role: 'system', text: "Reviewing timeline for edit suggestions..." }]);
-            const suggestions = await suggestEdits(clips);
-            const text = suggestions.map((s, i) => `**${i+1}. ${s.label}**\n${s.description}`).join('\n\n');
-            setMessages(prev => [...prev, { role: 'model', text: text }]);
-        } else {
-            const response = await chatWithGemini(messages, inputText);
-            setMessages(prev => [...prev, { role: 'model', text: response }]);
-        }
-    } catch (error: any) {
-        console.error(error);
-        setMessages(prev => [...prev, { role: 'system', text: `Error: ${error.message}` }]);
-    } finally {
-        setIsAnalyzing(false);
-    }
-  };
+  const handleSendMessage = async () => { if (!inputText.trim()) return; const userMessage: ChatMessage = { role: 'user', text: inputText }; setMessages(prev => [...prev, userMessage]); setInputText(''); setIsAnalyzing(true); try { if (videoFile && (inputText.toLowerCase().includes('analyze') || inputText.toLowerCase().includes('review'))) { setMessages(prev => [...prev, { role: 'system', text: "Analyzing video frames... (this uses Gemini 3 Pro Vision)" }]); const frames = await extractFramesFromVideo(videoFile, 10); const result = await analyzeVideoFrames(frames, inputText); setMessages(prev => [...prev, { role: 'model', text: result }]); } else if (inputText.toLowerCase().includes('suggest') || inputText.toLowerCase().includes('edit')) { setMessages(prev => [...prev, { role: 'system', text: "Reviewing timeline for edit suggestions..." }]); const suggestions = await suggestEdits(clips); const text = suggestions.map((s, i) => `**${i+1}. ${s.label}**\n${s.description}`).join('\n\n'); setMessages(prev => [...prev, { role: 'model', text: text }]); } else { const response = await chatWithGemini(messages, inputText); setMessages(prev => [...prev, { role: 'model', text: response }]); } } catch (error: any) { console.error(error); setMessages(prev => [...prev, { role: 'system', text: `Error: ${error.message}` }]); } finally { setIsAnalyzing(false); } };
   
   // Reused Controls for Caption Modal
   const TextControls = ({ values, onChange }: { values: any, onChange: (u: any) => void }) => (
       <div className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
-              {/* Font Family Selector */}
-              <div className="col-span-2 sm:col-span-1">
-                  <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Font</label>
-                  <select 
-                      value={values.fontFamily || 'Plus Jakarta Sans'}
-                      onChange={(e) => onChange({ fontFamily: e.target.value })}
-                      className="w-full bg-neutral-900 border border-neutral-700 rounded text-xs text-white py-1.5 px-2 focus:outline-none focus:border-blue-500"
-                  >
-                      <option value="Plus Jakarta Sans">Plus Jakarta Sans</option>
-                      <option value="Google Sans Flex">Google Sans Flex</option>
-                      <option value="Helvetica">Helvetica</option>
-                      <option value="Arial">Arial</option>
-                      <option value="Times New Roman">Times New Roman</option>
-                      <option value="Courier New">Courier New</option>
-                  </select>
-              </div>
-
-              {/* Font Size with Slider and Manual Input */}
-              <div className="col-span-2 sm:col-span-1">
-                  <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Size</label>
-                  <div className="flex items-center gap-2">
-                      <input 
-                          type="range" 
-                          min="6" 
-                          max="18" 
-                          step="1"
-                          value={Math.min(Math.max(values.fontSize || 10, 6), 18)} 
-                          onChange={(e) => onChange({ fontSize: parseInt(e.target.value) })} 
-                          className="flex-1 h-1.5 bg-neutral-600 rounded-lg appearance-none cursor-pointer accent-blue-500" 
-                      />
-                      <input 
-                          type="number" 
-                          min="1"
-                          value={values.fontSize || 10} 
-                          onChange={(e) => onChange({ fontSize: parseInt(e.target.value) || 10 })}
-                          className="w-12 bg-neutral-900 border border-neutral-700 rounded text-xs text-center py-0.5 text-white focus:outline-none focus:border-blue-500"
-                      />
-                  </div>
-              </div>
+              <div className="col-span-2 sm:col-span-1"><label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Font</label><select value={values.fontFamily || 'Plus Jakarta Sans'} onChange={(e) => onChange({ fontFamily: e.target.value })} className="w-full bg-neutral-900 border border-neutral-700 rounded text-xs text-white py-1.5 px-2 focus:outline-none focus:border-blue-500"><option value="Plus Jakarta Sans">Plus Jakarta Sans</option><option value="Google Sans Flex">Google Sans Flex</option><option value="Helvetica">Helvetica</option><option value="Arial">Arial</option><option value="Times New Roman">Times New Roman</option><option value="Courier New">Courier New</option></select></div>
+              <div className="col-span-2 sm:col-span-1"><label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Size</label><div className="flex items-center gap-2"><input type="range" min="6" max="18" step="1" value={Math.min(Math.max(values.fontSize || 10, 6), 18)} onChange={(e) => onChange({ fontSize: parseInt(e.target.value) })} className="flex-1 h-1.5 bg-neutral-600 rounded-lg appearance-none cursor-pointer accent-blue-500" /><input type="number" min="1" value={values.fontSize || 10} onChange={(e) => onChange({ fontSize: parseInt(e.target.value) || 10 })} className="w-12 bg-neutral-900 border border-neutral-700 rounded text-xs text-center py-0.5 text-white focus:outline-none focus:border-blue-500" /></div></div>
           </div>
-
-          <div>
-              <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Style</label>
-              <div className="flex bg-neutral-900 rounded p-1 gap-1 border border-neutral-800">
-                  <button onClick={() => onChange({ isBold: !values.isBold })} className={`flex-1 p-1.5 rounded flex justify-center transition-colors ${values.isBold ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Bold size={14} /></button>
-                  <button onClick={() => onChange({ isItalic: !values.isItalic })} className={`flex-1 p-1.5 rounded flex justify-center transition-colors ${values.isItalic ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Italic size={14} /></button>
-                  <button onClick={() => onChange({ isUnderline: !values.isUnderline })} className={`flex-1 p-1.5 rounded flex justify-center transition-colors ${values.isUnderline ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Underline size={14} /></button>
-              </div>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-              <div>
-                  <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Text Color</label>
-                  <div className="flex items-center gap-2 bg-neutral-900 p-1.5 rounded border border-neutral-800">
-                      <input type="color" value={values.color || '#ffffff'} onChange={(e) => onChange({ color: e.target.value })} className="w-6 h-6 rounded cursor-pointer border-0 bg-transparent p-0" />
-                      <span className="text-xs text-neutral-400 uppercase font-mono">{values.color}</span>
-                  </div>
-              </div>
-              <div>
-                  <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Bg Color</label>
-                  <div className="flex items-center gap-2 bg-neutral-900 p-1.5 rounded border border-neutral-800">
-                      <input type="color" value={values.backgroundColor || '#000000'} onChange={(e) => onChange({ backgroundColor: e.target.value })} className="w-6 h-6 rounded cursor-pointer border-0 bg-transparent p-0" />
-                      <span className="text-xs text-neutral-400 uppercase font-mono">{values.backgroundColor}</span>
-                  </div>
-              </div>
-          </div>
-          <div>
-              <label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Background Opacity</label>
-              <div className="flex items-center gap-2">
-                  <input type="range" min="0" max="1" step="0.1" value={values.backgroundOpacity ?? 0} onChange={(e) => onChange({ backgroundOpacity: parseFloat(e.target.value) })} className="flex-1 h-1.5 bg-neutral-600 rounded-lg appearance-none cursor-pointer accent-blue-500" />
-                  <span className="text-xs w-8 text-right text-neutral-400">{Math.round((values.backgroundOpacity ?? 0) * 100)}%</span>
-              </div>
-          </div>
+          <div><label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Style</label><div className="flex bg-neutral-900 rounded p-1 gap-1 border border-neutral-800"><button onClick={() => onChange({ isBold: !values.isBold })} className={`flex-1 p-1.5 rounded flex justify-center transition-colors ${values.isBold ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Bold size={14} /></button><button onClick={() => onChange({ isItalic: !values.isItalic })} className={`flex-1 p-1.5 rounded flex justify-center transition-colors ${values.isItalic ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Italic size={14} /></button><button onClick={() => onChange({ isUnderline: !values.isUnderline })} className={`flex-1 p-1.5 rounded flex justify-center transition-colors ${values.isUnderline ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}`}><Underline size={14} /></button></div></div>
+          <div className="grid grid-cols-2 gap-4"><div><label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Text Color</label><div className="flex items-center gap-2 bg-neutral-900 p-1.5 rounded border border-neutral-800"><input type="color" value={values.color || '#ffffff'} onChange={(e) => onChange({ color: e.target.value })} className="w-6 h-6 rounded cursor-pointer border-0 bg-transparent p-0" /><span className="text-xs text-neutral-400 uppercase font-mono">{values.color}</span></div></div><div><label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Bg Color</label><div className="flex items-center gap-2 bg-neutral-900 p-1.5 rounded border border-neutral-800"><input type="color" value={values.backgroundColor || '#000000'} onChange={(e) => onChange({ backgroundColor: e.target.value })} className="w-6 h-6 rounded cursor-pointer border-0 bg-transparent p-0" /><span className="text-xs text-neutral-400 uppercase font-mono">{values.backgroundColor}</span></div></div></div>
+          <div><label className="text-[10px] text-neutral-500 uppercase font-semibold mb-1 block">Background Opacity</label><div className="flex items-center gap-2"><input type="range" min="0" max="1" step="0.1" value={values.backgroundOpacity ?? 0} onChange={(e) => onChange({ backgroundOpacity: parseFloat(e.target.value) })} className="flex-1 h-1.5 bg-neutral-600 rounded-lg appearance-none cursor-pointer accent-blue-500" /><span className="text-xs w-8 text-right text-neutral-400">{Math.round((values.backgroundOpacity ?? 0) * 100)}%</span></div></div>
       </div>
   );
 
   return (
     <div className="flex flex-col h-screen bg-neutral-950 text-neutral-100 font-sans overflow-hidden">
-      {/* ... (Modals and Hidden Inputs - Unchanged) ... */}
+      {/* ... (UI layout identical to previous, just function references updated) ... */}
+      {/* ... Modals ... */}
       <input type="file" multiple accept="video/*,image/*,audio/*" className="hidden" ref={fileInputRef} onChange={handleAddMedia} />
       <input type="file" accept="image/*" className="hidden" ref={referenceImageInputRef} onChange={handleReferenceImageFileChange} />
       {captionModalOpen && (
@@ -749,25 +621,16 @@ export default function App() {
                       <button onClick={() => setCaptionModalOpen(false)} className="p-1.5 hover:bg-neutral-800 rounded-full text-neutral-400 hover:text-white transition-colors"><X className="w-5 h-5" /></button>
                   </div>
                   <div className="p-6 space-y-6">
-                      <div className="bg-neutral-800/50 rounded-lg p-4 border border-neutral-700/50">
-                        <div className="flex items-start gap-3"><Info className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" /><div className="space-y-1"><p className="text-sm font-medium text-white">Source Selection</p><p className="text-xs text-neutral-400 leading-relaxed">Subtitles will be generated from the <strong>Main Video</strong> uploaded to the project. {videoFile ? ` (Main Video: ${videoFile.name})` : (availableVideo ? " (Using first timeline video)" : " (No video detected)")}</p></div></div>
-                      </div>
-                      
-                      {/* Caption Style Configuration */}
-                      <div className="p-4 rounded-xl border border-neutral-800 bg-neutral-950/50">
-                          <label className="text-xs font-semibold text-neutral-400 uppercase mb-3 block tracking-wider">Default Style</label>
-                          <TextControls values={captionStyle} onChange={(updates) => setCaptionStyle(prev => ({...prev, ...updates}))} />
-                      </div>
-
-                      <div className="flex justify-end pt-2">
-                          <button onClick={handleGenerateCaptions} disabled={isGenerating || !availableVideo} className="flex items-center gap-2 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white px-6 py-2.5 rounded-lg font-medium text-sm transition-all disabled:opacity-50 shadow-lg w-full justify-center">{isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />} Generate with Gemini 2.5 Flash</button>
-                      </div>
+                      <div className="bg-neutral-800/50 rounded-lg p-4 border border-neutral-700/50"><div className="flex items-start gap-3"><Info className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" /><div className="space-y-1"><p className="text-sm font-medium text-white">Source Selection</p><p className="text-xs text-neutral-400 leading-relaxed">Subtitles will be generated from the <strong>Main Video</strong> uploaded to the project. {videoFile ? ` (Main Video: ${videoFile.name})` : (availableVideo ? " (Using first timeline video)" : " (No video detected)")}</p></div></div></div>
+                      <div className="p-4 rounded-xl border border-neutral-800 bg-neutral-950/50"><label className="text-xs font-semibold text-neutral-400 uppercase mb-3 block tracking-wider">Default Style</label><TextControls values={captionStyle} onChange={(updates) => setCaptionStyle(prev => ({...prev, ...updates}))} /></div>
+                      <div className="flex justify-end pt-2"><button onClick={handleGenerateCaptions} disabled={isGenerating || !availableVideo} className="flex items-center gap-2 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white px-6 py-2.5 rounded-lg font-medium text-sm transition-all disabled:opacity-50 shadow-lg w-full justify-center">{isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />} Generate with Gemini 2.5 Flash</button></div>
                   </div>
               </div>
           </div>
       )}
-      {transitionModal.active && ( /* ... */ <div className="fixed inset-0 z-[600] flex items-center justify-center p-4"><div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setTransitionModal(prev => ({ ...prev, active: false }))} /><div className="relative w-full max-w-lg bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200"><div className="p-4 border-b border-neutral-800 flex items-center justify-between bg-neutral-900"><div className="flex items-center gap-2"><Wand2 className="w-5 h-5 text-purple-400" /><h3 className="text-lg font-semibold text-white">Generate Transition</h3></div><button onClick={() => setTransitionModal(prev => ({ ...prev, active: false }))} className="p-1.5 hover:bg-neutral-800 rounded-full text-neutral-400 hover:text-white transition-colors"><X className="w-5 h-5" /></button></div><div className="p-6 space-y-6"><div className="flex items-center gap-2 justify-center"><div className="relative w-32 aspect-video bg-neutral-800 rounded-lg overflow-hidden border border-neutral-700"><img src={transitionModal.startFrame || ''} className="w-full h-full object-cover" alt="Out Point" /><div className="absolute bottom-1 left-1 bg-black/50 px-1.5 py-0.5 rounded text-[9px] text-white backdrop-blur">Clip A End</div></div><ArrowRight className="w-5 h-5 text-neutral-500" /><div className="relative w-32 aspect-video bg-neutral-800 rounded-lg overflow-hidden border border-neutral-700"><img src={transitionModal.endFrame || ''} className="w-full h-full object-cover" alt="In Point" /><div className="absolute bottom-1 right-1 bg-black/50 px-1.5 py-0.5 rounded text-[9px] text-white backdrop-blur">Clip B Start</div></div></div><div className="space-y-4"><div><label className="block text-xs font-medium text-neutral-400 mb-1.5">Transition Description</label><textarea value={transitionModal.prompt} onChange={(e) => setTransitionModal(prev => ({ ...prev, prompt: e.target.value }))} placeholder="Describe the transition..." className="w-full h-20 bg-neutral-950 border border-neutral-700 rounded-lg p-3 text-sm focus:outline-none focus:border-purple-500 resize-none transition-all" /></div><div className="grid grid-cols-2 gap-4"><div className="col-span-2"><label className="block text-xs font-medium text-neutral-400 mb-1.5">Model</label><select value={transitionModal.model} onChange={(e) => setTransitionModal(prev => ({ ...prev, model: e.target.value }))} className="w-full bg-neutral-950 border border-neutral-700 rounded-lg p-2.5 text-sm focus:outline-none focus:border-purple-500"><option value="veo-3.1-fast-generate-preview">Veo 3.1 Fast</option><option value="veo-3.1-generate-preview">Veo 3.1 Quality</option><option value="veo-3.0-fast-generate-preview">Veo 3 Fast</option><option value="veo-3.0-generate-preview">Veo 3 Quality</option></select></div><div><label className="block text-xs font-medium text-neutral-400 mb-1.5">Resolution</label><select value={transitionModal.resolution} onChange={(e) => setTransitionModal(prev => ({ ...prev, resolution: e.target.value as any }))} className="w-full bg-neutral-950 border border-neutral-700 rounded-lg p-2.5 text-sm focus:outline-none focus:border-purple-500"><option value="720p">720p</option><option value="1080p">1080p (8s only)</option><option value="4k">4k (8s only)</option></select></div><div><label className="block text-xs font-medium text-neutral-400 mb-1.5">Duration</label><select value={transitionModal.duration} disabled={true} className="w-full bg-neutral-950 border border-neutral-800 rounded-lg p-2.5 text-sm text-neutral-500 cursor-not-allowed" title="Transitions with reference images require 8s duration"><option value="8">8s (Forced)</option></select></div></div></div><div className="flex justify-end pt-2"><button onClick={handleGenerateTransition} disabled={isGenerating} className="flex items-center gap-2 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white px-6 py-2.5 rounded-lg font-medium text-sm transition-all disabled:opacity-50 shadow-lg">{isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />} Generate & Insert</button></div></div></div></div> )}
-      {mediaModalTrackId !== null && ( /* ... */ <div className="fixed inset-0 z-[500] flex items-center justify-center p-4"><div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={handleCloseMediaModal} /><div className="relative w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl p-0 overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]"><div className="p-4 border-b border-neutral-800 flex items-center justify-between"><h3 className="text-lg font-semibold text-white">Add Media to Track {mediaModalTrackId + 1}</h3><button onClick={handleCloseMediaModal} className="p-2 hover:bg-neutral-800 rounded-full text-neutral-400 hover:text-white transition-colors"><X className="w-5 h-5" /></button></div>{modalMode === 'initial' ? (<div className="p-8 grid grid-cols-2 gap-6"><button onClick={triggerLocalUpload} className="flex flex-col items-center justify-center gap-4 p-12 rounded-xl bg-neutral-800/50 border border-neutral-700 hover:border-blue-500/50 hover:bg-neutral-800 transition-all group"><div className="w-16 h-16 rounded-full bg-neutral-700 group-hover:bg-blue-600 flex items-center justify-center transition-colors shadow-lg"><Upload className="w-8 h-8 text-neutral-300 group-hover:text-white" /></div><div className="text-center"><p className="text-lg font-medium text-white mb-1">Upload Files</p><p className="text-sm text-neutral-400">Select multiple items</p></div></button><button onClick={() => setModalMode('generate')} className="flex flex-col items-center justify-center gap-4 p-12 rounded-xl bg-neutral-800/50 border border-neutral-700 hover:border-purple-500/50 hover:bg-neutral-800 transition-all group relative overflow-hidden"><div className="absolute inset-0 bg-gradient-to-br from-purple-500/10 to-blue-500/10 opacity-0 group-hover:opacity-100 transition-opacity" /><div className="w-16 h-16 rounded-full bg-neutral-700 group-hover:bg-purple-600 flex items-center justify-center transition-colors shadow-lg relative z-10"><GeminiLogo className="w-8 h-8" /></div><div className="text-center relative z-10"><p className="text-lg font-medium text-white mb-1">Generate with Gemini</p><p className="text-sm text-neutral-400">Image, Video, or Speech</p></div></button></div>) : (<div className="flex flex-1 min-h-0"><div className="w-48 border-r border-neutral-800 bg-neutral-900 p-2 space-y-1"><button onClick={() => setModalMode('initial')} className="flex items-center gap-2 w-full p-2 text-neutral-400 hover:text-white mb-4 transition-colors"><ChevronLeft className="w-4 h-4" /> Back</button>{[{ id: 'image', icon: ImageIcon, label: 'Image' },{ id: 'video', icon: Film, label: 'Video (Veo)' },{ id: 'audio', icon: Mic, label: 'Speech (TTS)' }].map(tab => (<button key={tab.id} onClick={() => setGenTab(tab.id as any)} className={`flex items-center gap-3 w-full p-3 rounded-lg text-sm font-medium transition-all ${genTab === tab.id ? 'bg-purple-600/20 text-purple-300' : 'text-neutral-400 hover:bg-neutral-800 hover:text-white'}`}><tab.icon className="w-4 h-4" /> {tab.label}</button>))}</div><div className="flex-1 p-6 overflow-y-auto bg-neutral-950/50"><div className="max-w-xl mx-auto space-y-6"><div><label className="block text-sm font-medium text-neutral-400 mb-2">{genTab === 'audio' ? 'Text to Speak' : 'Prompt'}</label><textarea value={genPrompt} onChange={(e) => setGenPrompt(e.target.value)} placeholder={genTab === 'audio' ? "Enter text..." : "Describe what you want to generate..."} className="w-full h-24 bg-neutral-900 border border-neutral-700 rounded-xl p-3 text-sm focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 resize-none transition-all" autoFocus /></div>{genTab === 'video' && (<div className="space-y-4 pt-2 border-t border-neutral-800"><div className="flex items-center justify-between mb-2"><span className="text-sm font-medium text-neutral-300">Reference Images</span><span className={`text-xs font-medium px-2 py-0.5 rounded-full bg-neutral-800 border border-neutral-700 ${veoModeColor}`}>{veoModeLabel}</span></div><div className="grid grid-cols-2 gap-4"><div className="space-y-2"><div className="flex items-center justify-between"><label className="text-xs font-medium text-neutral-500">Start Frame (Optional)</label>{veoStartImg && <button onClick={() => setVeoStartImg(null)} className="text-xs text-red-400 hover:text-red-300"><Trash2 className="w-3 h-3" /></button>}</div><div className="relative aspect-video bg-neutral-900 border border-neutral-700 rounded-lg overflow-hidden group hover:border-blue-500/50 transition-colors">{veoStartImg ? (<img src={veoStartImg} className="w-full h-full object-cover" alt="Start Frame" />) : (<div className="absolute inset-0 flex flex-col items-center justify-center gap-2"><button onClick={() => handleCaptureFrame('start')} className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 rounded text-xs text-neutral-300 transition-colors"><Camera className="w-3 h-3" /> Timeline</button><button onClick={() => handleVeoReferenceUpload('start')} className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 rounded text-xs text-neutral-300 transition-colors"><Upload className="w-3 h-3" /> Upload</button></div>)}</div><p className="text-[10px] text-neutral-600">Tip: Position playhead to capture specific timeline frame.</p></div><div className="space-y-2"><div className="flex items-center justify-between"><label className={`text-xs font-medium ${!veoStartImg ? 'text-neutral-700' : 'text-neutral-500'}`}>End Frame (Requires Start Frame)</label>{veoEndImg && <button onClick={() => setVeoEndImg(null)} className="text-xs text-red-400 hover:text-red-300"><Trash2 className="w-3 h-3" /></button>}</div><div className={`relative aspect-video bg-neutral-900 border rounded-lg overflow-hidden group transition-colors ${!veoStartImg ? 'border-neutral-800 opacity-50 pointer-events-none' : 'border-neutral-700 hover:border-purple-500/50'}`}>{veoEndImg ? (<img src={veoEndImg} className="w-full h-full object-cover" alt="End Frame" />) : (<div className="absolute inset-0 flex flex-col items-center justify-center gap-2"><button onClick={() => handleCaptureFrame('end')} className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 rounded text-xs text-neutral-300 transition-colors"><Camera className="w-3 h-3" /> Timeline</button><button onClick={() => handleVeoReferenceUpload('end')} className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 rounded text-xs text-neutral-300 transition-colors"><Upload className="w-3 h-3" /> Upload</button></div>)}</div></div></div></div>)}{genTab === 'image' && (<div className="grid grid-cols-2 gap-4"><div><label className="block text-xs font-medium text-neutral-500 mb-1">Model</label><select value={imgModel} onChange={(e) => setImgModel(e.target.value as any)} className="w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500"><option value="gemini-2.5-flash-image">Fast (Flash)</option><option value="gemini-3-pro-image-preview">High Quality (Pro)</option></select></div><div><label className="block text-xs font-medium text-neutral-500 mb-1">Aspect Ratio</label><select value={imgAspect} onChange={(e) => setImgAspect(e.target.value)} className="w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500"><option value="16:9">16:9 (Landscape)</option><option value="9:16">9:16 (Portrait)</option><option value="1:1">1:1 (Square)</option></select></div></div>)}{genTab === 'video' && (<div className="grid grid-cols-2 gap-4"><div className="col-span-2 grid grid-cols-2 gap-4"><div><label className="block text-xs font-medium text-neutral-500 mb-1">Model</label><select value={vidModel} onChange={(e) => setVidModel(e.target.value as any)} className="w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500"><option value="veo-3.1-fast-generate-preview">Veo 3.1 Fast</option><option value="veo-3.1-generate-preview">Veo 3.1 Quality</option><option value="veo-3.0-fast-generate-preview">Veo 3 Fast</option><option value="veo-3.0-generate-preview">Veo 3 Quality</option></select></div><div><label className="block text-xs font-medium text-neutral-500 mb-1">Resolution</label><select value={vidResolution} onChange={(e) => setVidResolution(e.target.value as any)} className="w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500"><option value="720p">720p</option><option value="1080p">1080p (8s only)</option><option value="4k">4k (8s only)</option></select></div><div><label className="block text-xs font-medium text-neutral-500 mb-1">Duration</label><select value={vidDuration} onChange={(e) => setVidDuration(e.target.value as any)} disabled={vidResolution === '1080p' || vidResolution === '4k' || !!veoStartImg || !!veoEndImg} className={`w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500 ${vidResolution === '1080p' || vidResolution === '4k' || !!veoStartImg || !!veoEndImg ? 'opacity-50 cursor-not-allowed bg-neutral-800' : ''}`}><option value="4">4s</option><option value="8">8s</option></select></div><div><label className="block text-xs font-medium text-neutral-500 mb-1">Aspect Ratio</label><select value={vidAspect} onChange={(e) => setVidAspect(e.target.value)} className="w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500"><option value="16:9">16:9 (Landscape)</option><option value="9:16">9:16 (Portrait)</option></select></div></div><div className="col-span-2 p-3 bg-blue-900/20 border border-blue-500/20 rounded-lg flex items-start gap-2"><Info className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" /><span className="text-xs text-blue-300 leading-relaxed">Video generation takes 1-2 minutes. A paid billing project is required.<br/><strong>Note:</strong> 1080p, 4K, and Image-to-Video operations are locked to 8s duration.</span></div></div>)}{genTab === 'audio' && (<div><label className="block text-xs font-medium text-neutral-500 mb-1">Voice</label><div className="grid grid-cols-5 gap-2">{['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'].map(voice => (<button key={voice} onClick={() => setAudioVoice(voice)} className={`p-2 rounded border text-xs font-medium transition-all ${audioVoice === voice ? 'bg-purple-600 border-purple-500 text-white' : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:border-neutral-600'}`}>{voice}</button>))}</div></div>)}<div className="flex justify-end pt-4"><button onClick={handleGenerate} disabled={isGenerating || (genTab !== 'video' && !genPrompt.trim()) || (genTab === 'video' && !genPrompt.trim() && !veoStartImg)} className="flex items-center gap-2 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white px-8 py-3 rounded-lg font-medium text-sm transition-all disabled:opacity-50 shadow-lg shadow-purple-900/20 w-full justify-center">{isGenerating ? (<><Loader2 className="w-5 h-5 animate-spin" />{genTab === 'video' ? 'Generating Video...' : 'Generating...'}</>) : (<><Sparkles className="w-5 h-5" />Generate {genTab.charAt(0).toUpperCase() + genTab.slice(1)}</>)}</button></div></div></div></div>)}</div></div>)}
+      {/* ... Transition & Media Modals (Identical) ... */}
+      {transitionModal.active && ( <div className="fixed inset-0 z-[600] flex items-center justify-center p-4"><div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setTransitionModal(prev => ({ ...prev, active: false }))} /><div className="relative w-full max-w-lg bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200"><div className="p-4 border-b border-neutral-800 flex items-center justify-between bg-neutral-900"><div className="flex items-center gap-2"><Wand2 className="w-5 h-5 text-purple-400" /><h3 className="text-lg font-semibold text-white">Generate Transition</h3></div><button onClick={() => setTransitionModal(prev => ({ ...prev, active: false }))} className="p-1.5 hover:bg-neutral-800 rounded-full text-neutral-400 hover:text-white transition-colors"><X className="w-5 h-5" /></button></div><div className="p-6 space-y-6"><div className="flex items-center gap-2 justify-center"><div className="relative w-32 aspect-video bg-neutral-800 rounded-lg overflow-hidden border border-neutral-700"><img src={transitionModal.startFrame || ''} className="w-full h-full object-cover" alt="Out Point" /><div className="absolute bottom-1 left-1 bg-black/50 px-1.5 py-0.5 rounded text-[9px] text-white backdrop-blur">Clip A End</div></div><ArrowRight className="w-5 h-5 text-neutral-500" /><div className="relative w-32 aspect-video bg-neutral-800 rounded-lg overflow-hidden border border-neutral-700"><img src={transitionModal.endFrame || ''} className="w-full h-full object-cover" alt="In Point" /><div className="absolute bottom-1 right-1 bg-black/50 px-1.5 py-0.5 rounded text-[9px] text-white backdrop-blur">Clip B Start</div></div></div><div className="space-y-4"><div><label className="block text-xs font-medium text-neutral-400 mb-1.5">Transition Description</label><textarea value={transitionModal.prompt} onChange={(e) => setTransitionModal(prev => ({ ...prev, prompt: e.target.value }))} placeholder="Describe the transition..." className="w-full h-20 bg-neutral-950 border border-neutral-700 rounded-lg p-3 text-sm focus:outline-none focus:border-purple-500 resize-none transition-all" /></div><div className="grid grid-cols-2 gap-4"><div className="col-span-2"><label className="block text-xs font-medium text-neutral-400 mb-1.5">Model</label><select value={transitionModal.model} onChange={(e) => setTransitionModal(prev => ({ ...prev, model: e.target.value }))} className="w-full bg-neutral-950 border border-neutral-700 rounded-lg p-2.5 text-sm focus:outline-none focus:border-purple-500"><option value="veo-3.1-fast-generate-preview">Veo 3.1 Fast</option><option value="veo-3.1-generate-preview">Veo 3.1 Quality</option><option value="veo-3.0-fast-generate-preview">Veo 3 Fast</option><option value="veo-3.0-generate-preview">Veo 3 Quality</option></select></div><div><label className="block text-xs font-medium text-neutral-400 mb-1.5">Resolution</label><select value={transitionModal.resolution} onChange={(e) => setTransitionModal(prev => ({ ...prev, resolution: e.target.value as any }))} className="w-full bg-neutral-950 border border-neutral-700 rounded-lg p-2.5 text-sm focus:outline-none focus:border-purple-500"><option value="720p">720p</option><option value="1080p">1080p (8s only)</option><option value="4k">4k (8s only)</option></select></div><div><label className="block text-xs font-medium text-neutral-400 mb-1.5">Duration</label><select value={transitionModal.duration} disabled={true} className="w-full bg-neutral-950 border border-neutral-800 rounded-lg p-2.5 text-sm text-neutral-500 cursor-not-allowed" title="Transitions with reference images require 8s duration"><option value="8">8s (Forced)</option></select></div></div></div><div className="flex justify-end pt-2"><button onClick={handleGenerateTransition} disabled={isGenerating} className="flex items-center gap-2 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white px-6 py-2.5 rounded-lg font-medium text-sm transition-all disabled:opacity-50 shadow-lg">{isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />} Generate & Insert</button></div></div></div></div> )}
+      {mediaModalTrackId !== null && ( <div className="fixed inset-0 z-[500] flex items-center justify-center p-4"><div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={handleCloseMediaModal} /><div className="relative w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl p-0 overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]"><div className="p-4 border-b border-neutral-800 flex items-center justify-between"><h3 className="text-lg font-semibold text-white">Add Media to Track {mediaModalTrackId + 1}</h3><button onClick={handleCloseMediaModal} className="p-2 hover:bg-neutral-800 rounded-full text-neutral-400 hover:text-white transition-colors"><X className="w-5 h-5" /></button></div>{modalMode === 'initial' ? (<div className="p-8 grid grid-cols-2 gap-6"><button onClick={triggerLocalUpload} className="flex flex-col items-center justify-center gap-4 p-12 rounded-xl bg-neutral-800/50 border border-neutral-700 hover:border-blue-500/50 hover:bg-neutral-800 transition-all group"><div className="w-16 h-16 rounded-full bg-neutral-700 group-hover:bg-blue-600 flex items-center justify-center transition-colors shadow-lg"><Upload className="w-8 h-8 text-neutral-300 group-hover:text-white" /></div><div className="text-center"><p className="text-lg font-medium text-white mb-1">Upload Files</p><p className="text-sm text-neutral-400">Select multiple items</p></div></button><button onClick={() => setModalMode('generate')} className="flex flex-col items-center justify-center gap-4 p-12 rounded-xl bg-neutral-800/50 border border-neutral-700 hover:border-purple-500/50 hover:bg-neutral-800 transition-all group relative overflow-hidden"><div className="absolute inset-0 bg-gradient-to-br from-purple-500/10 to-blue-500/10 opacity-0 group-hover:opacity-100 transition-opacity" /><div className="w-16 h-16 rounded-full bg-neutral-700 group-hover:bg-purple-600 flex items-center justify-center transition-colors shadow-lg relative z-10"><GeminiLogo className="w-8 h-8" /></div><div className="text-center relative z-10"><p className="text-lg font-medium text-white mb-1">Generate with Gemini</p><p className="text-sm text-neutral-400">Image, Video, or Speech</p></div></button></div>) : (<div className="flex flex-1 min-h-0"><div className="w-48 border-r border-neutral-800 bg-neutral-900 p-2 space-y-1"><button onClick={() => setModalMode('initial')} className="flex items-center gap-2 w-full p-2 text-neutral-400 hover:text-white mb-4 transition-colors"><ChevronLeft className="w-4 h-4" /> Back</button>{[{ id: 'image', icon: ImageIcon, label: 'Image' },{ id: 'video', icon: Film, label: 'Video (Veo)' },{ id: 'audio', icon: Mic, label: 'Speech (TTS)' }].map(tab => (<button key={tab.id} onClick={() => setGenTab(tab.id as any)} className={`flex items-center gap-3 w-full p-3 rounded-lg text-sm font-medium transition-all ${genTab === tab.id ? 'bg-purple-600/20 text-purple-300' : 'text-neutral-400 hover:bg-neutral-800 hover:text-white'}`}><tab.icon className="w-4 h-4" /> {tab.label}</button>))}</div><div className="flex-1 p-6 overflow-y-auto bg-neutral-950/50"><div className="max-w-xl mx-auto space-y-6"><div><label className="block text-sm font-medium text-neutral-400 mb-2">{genTab === 'audio' ? 'Text to Speak' : 'Prompt'}</label><textarea value={genPrompt} onChange={(e) => setGenPrompt(e.target.value)} placeholder={genTab === 'audio' ? "Enter text..." : "Describe what you want to generate..."} className="w-full h-24 bg-neutral-900 border border-neutral-700 rounded-xl p-3 text-sm focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 resize-none transition-all" autoFocus /></div>{genTab === 'video' && (<div className="space-y-4 pt-2 border-t border-neutral-800"><div className="flex items-center justify-between mb-2"><span className="text-sm font-medium text-neutral-300">Reference Images</span><span className={`text-xs font-medium px-2 py-0.5 rounded-full bg-neutral-800 border border-neutral-700 ${veoModeColor}`}>{veoModeLabel}</span></div><div className="grid grid-cols-2 gap-4"><div className="space-y-2"><div className="flex items-center justify-between"><label className="text-xs font-medium text-neutral-500">Start Frame (Optional)</label>{veoStartImg && <button onClick={() => setVeoStartImg(null)} className="text-xs text-red-400 hover:text-red-300"><Trash2 className="w-3 h-3" /></button>}</div><div className="relative aspect-video bg-neutral-900 border border-neutral-700 rounded-lg overflow-hidden group hover:border-blue-500/50 transition-colors">{veoStartImg ? (<img src={veoStartImg} className="w-full h-full object-cover" alt="Start Frame" />) : (<div className="absolute inset-0 flex flex-col items-center justify-center gap-2"><button onClick={() => handleCaptureFrame('start')} className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 rounded text-xs text-neutral-300 transition-colors"><Camera className="w-3 h-3" /> Timeline</button><button onClick={() => handleVeoReferenceUpload('start')} className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 rounded text-xs text-neutral-300 transition-colors"><Upload className="w-3 h-3" /> Upload</button></div>)}</div><p className="text-[10px] text-neutral-600">Tip: Position playhead to capture specific timeline frame.</p></div><div className="space-y-2"><div className="flex items-center justify-between"><label className={`text-xs font-medium ${!veoStartImg ? 'text-neutral-700' : 'text-neutral-500'}`}>End Frame (Requires Start Frame)</label>{veoEndImg && <button onClick={() => setVeoEndImg(null)} className="text-xs text-red-400 hover:text-red-300"><Trash2 className="w-3 h-3" /></button>}</div><div className={`relative aspect-video bg-neutral-900 border rounded-lg overflow-hidden group transition-colors ${!veoStartImg ? 'border-neutral-800 opacity-50 pointer-events-none' : 'border-neutral-700 hover:border-purple-500/50'}`}>{veoEndImg ? (<img src={veoEndImg} className="w-full h-full object-cover" alt="End Frame" />) : (<div className="absolute inset-0 flex flex-col items-center justify-center gap-2"><button onClick={() => handleCaptureFrame('end')} className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 rounded text-xs text-neutral-300 transition-colors"><Camera className="w-3 h-3" /> Timeline</button><button onClick={() => handleVeoReferenceUpload('end')} className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 rounded text-xs text-neutral-300 transition-colors"><Upload className="w-3 h-3" /> Upload</button></div>)}</div></div></div></div>)}{genTab === 'image' && (<div className="grid grid-cols-2 gap-4"><div><label className="block text-xs font-medium text-neutral-500 mb-1">Model</label><select value={imgModel} onChange={(e) => setImgModel(e.target.value as any)} className="w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500"><option value="gemini-2.5-flash-image">Fast (Flash)</option><option value="gemini-3-pro-image-preview">High Quality (Pro)</option></select></div><div><label className="block text-xs font-medium text-neutral-500 mb-1">Aspect Ratio</label><select value={imgAspect} onChange={(e) => setImgAspect(e.target.value)} className="w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500"><option value="16:9">16:9 (Landscape)</option><option value="9:16">9:16 (Portrait)</option><option value="1:1">1:1 (Square)</option></select></div></div>)}{genTab === 'video' && (<div className="grid grid-cols-2 gap-4"><div className="col-span-2 grid grid-cols-2 gap-4"><div><label className="block text-xs font-medium text-neutral-500 mb-1">Model</label><select value={vidModel} onChange={(e) => setVidModel(e.target.value as any)} className="w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500"><option value="veo-3.1-fast-generate-preview">Veo 3.1 Fast</option><option value="veo-3.1-generate-preview">Veo 3.1 Quality</option><option value="veo-3.0-fast-generate-preview">Veo 3 Fast</option><option value="veo-3.0-generate-preview">Veo 3 Quality</option></select></div><div><label className="block text-xs font-medium text-neutral-500 mb-1">Resolution</label><select value={vidResolution} onChange={(e) => setVidResolution(e.target.value as any)} className="w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500"><option value="720p">720p</option><option value="1080p">1080p (8s only)</option><option value="4k">4k (8s only)</option></select></div><div><label className="block text-xs font-medium text-neutral-500 mb-1">Duration</label><select value={vidDuration} onChange={(e) => setVidDuration(e.target.value as any)} disabled={vidResolution === '1080p' || vidResolution === '4k' || !!veoStartImg || !!veoEndImg} className={`w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500 ${vidResolution === '1080p' || vidResolution === '4k' || !!veoStartImg || !!veoEndImg ? 'opacity-50 cursor-not-allowed bg-neutral-800' : ''}`}><option value="4">4s</option><option value="8">8s</option></select></div><div><label className="block text-xs font-medium text-neutral-500 mb-1">Aspect Ratio</label><select value={vidAspect} onChange={(e) => setVidAspect(e.target.value)} className="w-full bg-neutral-900 border border-neutral-700 rounded-lg p-2 text-sm focus:outline-none focus:border-purple-500"><option value="16:9">16:9 (Landscape)</option><option value="9:16">9:16 (Portrait)</option></select></div></div><div className="col-span-2 p-3 bg-blue-900/20 border border-blue-500/20 rounded-lg flex items-start gap-2"><Info className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" /><span className="text-xs text-blue-300 leading-relaxed">Video generation takes 1-2 minutes. A paid billing project is required.<br/><strong>Note:</strong> 1080p, 4K, and Image-to-Video operations are locked to 8s duration.</span></div></div>)}{genTab === 'audio' && (<div><label className="block text-xs font-medium text-neutral-500 mb-1">Voice</label><div className="grid grid-cols-5 gap-2">{['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'].map(voice => (<button key={voice} onClick={() => setAudioVoice(voice)} className={`p-2 rounded border text-xs font-medium transition-all ${audioVoice === voice ? 'bg-purple-600 border-purple-500 text-white' : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:border-neutral-600'}`}>{voice}</button>))}</div></div>)}<div className="flex justify-end pt-4"><button onClick={handleGenerate} disabled={isGenerating || (genTab !== 'video' && !genPrompt.trim()) || (genTab === 'video' && !genPrompt.trim() && !veoStartImg)} className="flex items-center gap-2 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white px-8 py-3 rounded-lg font-medium text-sm transition-all disabled:opacity-50 shadow-lg shadow-purple-900/20 w-full justify-center">{isGenerating ? (<><Loader2 className="w-5 h-5 animate-spin" />{genTab === 'video' ? 'Generating Video...' : 'Generating...'}</>) : (<><Sparkles className="w-5 h-5" />Generate {genTab.charAt(0).toUpperCase() + genTab.slice(1)}</>)}</button></div></div></div></div>)}</div></div>)}
 
       {/* Header */}
       <header className="h-14 border-b border-neutral-800 flex items-center px-4 justify-between bg-neutral-900/50 backdrop-blur-sm z-10">

@@ -11,7 +11,7 @@ interface TimelineProps {
   onSelect: (id: string, e: React.MouseEvent) => void;
   onAddMediaRequest: (trackId: number) => void;
   onResize: (id: string, newDuration: number, mode: 'start' | 'end', commit: boolean) => void;
-  onReorder: (sourceId: string, targetId: string | null, targetTrackId: number) => void;
+  onReorder: (sourceId: string, newStartTime: number, targetTrackId: number, commit: boolean) => void;
   onAddTrack: (position: 'top' | 'bottom') => void;
   selectedClipIds: string[];
   onTransitionRequest?: (clipA: Clip, clipB: Clip) => void;
@@ -35,19 +35,22 @@ export const Timeline: React.FC<TimelineProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragState, setDragState] = useState<{
-      active: boolean;
-      clipId: string | null;
-      mode: 'start' | 'end';
+      type: 'move' | 'resize';
+      clipId: string;
       startX: number;
-      startDuration: number;
+      originalStartTime: number;
+      originalDuration: number;
+      originalTrackId: number;
+      resizeMode?: 'start' | 'end';
+      clickOffsetTime?: number;
   } | null>(null);
 
-  const [dragOverClipId, setDragOverClipId] = useState<string | null>(null);
-  const [dragOverTrackId, setDragOverTrackId] = useState<number | null>(null);
+  const [snapLineX, setSnapLineX] = useState<number | null>(null);
   const [hoveredGap, setHoveredGap] = useState<{ trackId: number, index: number } | null>(null);
+  const [dragOverTrackId, setDragOverTrackId] = useState<number | null>(null);
 
   useEffect(() => {
-    if (containerRef.current && !dragState?.active) {
+    if (containerRef.current && !dragState) {
         const container = containerRef.current.parentElement;
         if (container) {
             const pxPerSec = 40;
@@ -62,41 +65,145 @@ export const Timeline: React.FC<TimelineProps> = ({
     }
   }, [currentTime, dragState]);
 
+  // Snap Logic
+  const getSnapState = (
+      candidateTime: number, 
+      clips: Clip[], 
+      ignoreId: string, 
+      currentTime: number,
+      scale: number = 40,
+      thresholdPx: number = 15
+  ) => {
+      const threshold = thresholdPx / scale;
+      // Snap points: 0, Playhead, Clip Start, Clip End
+      const points = [0, currentTime];
+      clips.forEach(c => {
+          if (c.id === ignoreId) return;
+          points.push(c.startTime);
+          points.push(c.startTime + c.duration);
+      });
+      
+      let snappedTime = candidateTime;
+      let isSnapped = false;
+      let minDiff = threshold;
+
+      points.forEach(p => {
+          const diff = Math.abs(p - candidateTime);
+          if (diff < minDiff) {
+              minDiff = diff;
+              snappedTime = p;
+              isSnapped = true;
+          }
+      });
+      return { time: snappedTime, isSnapped };
+  }
+
   useEffect(() => {
-      if (!dragState?.active) return;
+      if (!dragState) return;
+
       const handleMouseMove = (e: MouseEvent) => {
-          if (!dragState.active || !dragState.clipId) return;
+          if (!dragState) return;
+          
           const deltaX = e.clientX - dragState.startX;
           const deltaSeconds = deltaX / 40; 
-          let newDuration = dragState.startDuration;
-          if (dragState.mode === 'end') {
-              newDuration = Math.max(0.5, dragState.startDuration + deltaSeconds);
-          } else {
-              newDuration = Math.max(0.5, dragState.startDuration - deltaSeconds);
+
+          if (dragState.type === 'move') {
+              // Calculate Raw New Time
+              let rawNewStart = dragState.originalStartTime + deltaSeconds;
+              
+              // Apply Snapping Logic
+              // Check start edge
+              const snapStart = getSnapState(rawNewStart, clips, dragState.clipId, currentTime);
+              // Check end edge
+              const rawNewEnd = rawNewStart + dragState.originalDuration;
+              const snapEnd = getSnapState(rawNewEnd, clips, dragState.clipId, currentTime);
+
+              let finalNewStart = rawNewStart;
+              let hasSnap = false;
+
+              // Prioritize strongest snap
+              if (snapStart.isSnapped) {
+                  finalNewStart = snapStart.time;
+                  hasSnap = true;
+                  setSnapLineX(snapStart.time * 40);
+              } else if (snapEnd.isSnapped) {
+                  finalNewStart = snapEnd.time - dragState.originalDuration;
+                  hasSnap = true;
+                  setSnapLineX(snapEnd.time * 40);
+              } else {
+                  setSnapLineX(null);
+              }
+
+              finalNewStart = Math.max(0, finalNewStart);
+              onReorder(dragState.clipId, finalNewStart, dragOverTrackId ?? dragState.originalTrackId, false);
+
+          } else if (dragState.type === 'resize' && dragState.resizeMode) {
+              let newDuration = dragState.originalDuration;
+              
+              if (dragState.resizeMode === 'end') {
+                  const rawNewEnd = dragState.originalStartTime + dragState.originalDuration + deltaSeconds;
+                  const snap = getSnapState(rawNewEnd, clips, dragState.clipId, currentTime);
+                  if (snap.isSnapped) {
+                      newDuration = snap.time - dragState.originalStartTime;
+                      setSnapLineX(snap.time * 40);
+                  } else {
+                      newDuration = dragState.originalDuration + deltaSeconds;
+                      setSnapLineX(null);
+                  }
+                  newDuration = Math.max(0.1, newDuration);
+              } else {
+                  // Start resize
+                  const rawNewStart = dragState.originalStartTime + deltaSeconds;
+                  const snap = getSnapState(rawNewStart, clips, dragState.clipId, currentTime);
+                  
+                  let effectiveStart = rawNewStart;
+                  if (snap.isSnapped) {
+                      effectiveStart = snap.time;
+                      setSnapLineX(snap.time * 40);
+                  } else {
+                      setSnapLineX(null);
+                  }
+                  // We handle this via duration update in parent usually, 
+                  // but parent logic handles "start" mode by adjusting start time too.
+                  // Just pass the desired duration
+                  const timeDiff = effectiveStart - dragState.originalStartTime;
+                  newDuration = Math.max(0.1, dragState.originalDuration - timeDiff);
+              }
+              onResize(dragState.clipId, newDuration, dragState.resizeMode, false);
           }
-          onResize(dragState.clipId, newDuration, dragState.mode, false);
       };
+
       const handleMouseUp = (e: MouseEvent) => {
-        if (dragState.active && dragState.clipId) {
-             const deltaX = e.clientX - dragState.startX;
-             const deltaSeconds = deltaX / 40;
-             let newDuration = dragState.startDuration;
-             if (dragState.mode === 'end') {
-                newDuration = Math.max(0.5, dragState.startDuration + deltaSeconds);
-            } else {
-                newDuration = Math.max(0.5, dragState.startDuration - deltaSeconds);
-            }
-            onResize(dragState.clipId, newDuration, dragState.mode, true);
+        if (dragState) {
+             if (dragState.type === 'move') {
+                 // Final commit call - trigger snap calculation one last time or just trust current state?
+                 // Safer to just commit current position.
+                 // We need to get the CURRENT start time from clips to commit it accurately if we relied on live updates
+                 // But wait, the parent state clips are updated live via 'false' commit. 
+                 // So we just need to confirm.
+                 const currentClip = clips.find(c => c.id === dragState.clipId);
+                 if (currentClip) {
+                     onReorder(dragState.clipId, currentClip.startTime, currentClip.trackId, true);
+                 }
+             } else if (dragState.type === 'resize' && dragState.resizeMode) {
+                 const currentClip = clips.find(c => c.id === dragState.clipId);
+                 if (currentClip) {
+                     onResize(dragState.clipId, currentClip.duration, dragState.resizeMode, true);
+                 }
+             }
         }
         setDragState(null);
+        setSnapLineX(null);
+        setDragOverTrackId(null);
       };
+
       document.addEventListener('mousemove', handleMouseMove);
       document.addEventListener('mouseup', handleMouseUp);
       return () => {
           document.removeEventListener('mousemove', handleMouseMove);
           document.removeEventListener('mouseup', handleMouseUp);
       };
-  }, [dragState, onResize]);
+  }, [dragState, onResize, onReorder, clips, currentTime, dragOverTrackId]);
 
   const totalDuration = clips.reduce((acc, clip) => Math.max(acc, clip.startTime + clip.duration), 0);
   const markers: number[] = [];
@@ -114,10 +221,12 @@ export const Timeline: React.FC<TimelineProps> = ({
       if ((e.target as HTMLElement).closest('button') || 
           (e.target as HTMLElement).closest('label') ||
           (e.target as HTMLElement).hasAttribute('data-resize-handle') ||
-          (e.target as HTMLElement).closest('[draggable="true"]') 
+          (e.target as HTMLElement).hasAttribute('data-clip-body') 
       ) return;
+      
       e.preventDefault();
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      
       const calculateTime = (clientX: number) => {
           if (!containerRef.current) return;
           const rect = containerRef.current.getBoundingClientRect();
@@ -126,6 +235,7 @@ export const Timeline: React.FC<TimelineProps> = ({
           onSeek(time);
       };
       calculateTime(e.clientX);
+      
       const handleMouseMove = (moveEvent: MouseEvent) => calculateTime(moveEvent.clientX);
       const handleMouseUp = () => {
           document.removeEventListener('mousemove', handleMouseMove);
@@ -138,27 +248,29 @@ export const Timeline: React.FC<TimelineProps> = ({
   const startResize = (e: React.MouseEvent, clip: Clip, mode: 'start' | 'end') => {
       e.preventDefault();
       e.stopPropagation();
-      setDragState({ active: true, clipId: clip.id, mode, startX: e.clientX, startDuration: clip.duration });
+      setDragState({ 
+          type: 'resize',
+          clipId: clip.id, 
+          resizeMode: mode, 
+          startX: e.clientX, 
+          originalStartTime: clip.startTime,
+          originalDuration: clip.duration,
+          originalTrackId: clip.trackId
+      });
   };
 
-  const handleDragStart = (e: React.DragEvent, id: string) => {
-      if ((e.target as HTMLElement).hasAttribute('data-resize-handle')) { e.preventDefault(); return; }
-      e.dataTransfer.setData('text/plain', id);
-      e.dataTransfer.effectAllowed = 'move';
-  };
-  const handleTrackDragOver = (e: React.DragEvent, trackId: number) => {
-      e.preventDefault(); 
-      if (dragOverTrackId !== trackId) setDragOverTrackId(trackId);
-  };
-  const handleClipDragOver = (e: React.DragEvent, id: string) => {
-      e.preventDefault(); e.stopPropagation();
-      if (dragOverClipId !== id) setDragOverClipId(id);
-  };
-  const handleDrop = (e: React.DragEvent, targetTrackId: number, targetClipId: string | null = null) => {
-      e.preventDefault(); e.stopPropagation();
-      const sourceId = e.dataTransfer.getData('text/plain');
-      if (sourceId) onReorder(sourceId, targetClipId, targetTrackId);
-      setDragOverClipId(null); setDragOverTrackId(null);
+  const startMove = (e: React.MouseEvent, clip: Clip) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onSelect(clip.id, e);
+      setDragState({
+          type: 'move',
+          clipId: clip.id,
+          startX: e.clientX,
+          originalStartTime: clip.startTime,
+          originalDuration: clip.duration,
+          originalTrackId: clip.trackId
+      });
   };
 
   return (
@@ -186,6 +298,11 @@ export const Timeline: React.FC<TimelineProps> = ({
                 <div className="absolute top-0 bottom-0 left-0 right-0 bg-red-500/20 w-px blur-[1px]" />
             </div>
 
+            {/* Snap Line */}
+            {snapLineX !== null && (
+                <div className="absolute top-0 bottom-0 w-px bg-yellow-400 z-[60] pointer-events-none shadow-[0_0_8px_rgba(250,204,21,0.8)]" style={{ left: `${snapLineX}px` }} />
+            )}
+
             <div className="flex flex-col py-4 gap-2">
                 {[...tracks].reverse().map((trackId) => {
                     // Filter and sort clips
@@ -193,19 +310,15 @@ export const Timeline: React.FC<TimelineProps> = ({
                     const isTrackDragOver = dragOverTrackId === trackId;
                     
                     return (
-                        <div key={trackId} className="relative">
+                        <div key={trackId} className="relative" onMouseEnter={() => dragState?.type === 'move' && setDragOverTrackId(trackId)}>
                             <div className="absolute left-2 -top-3 text-[9px] font-bold text-neutral-600 uppercase tracking-widest pointer-events-none z-10">Track {trackId + 1}</div>
                             <div 
                                 className={`h-24 w-full relative transition-colors ${isTrackDragOver ? 'bg-blue-900/10' : 'bg-neutral-800/20'} border-y border-neutral-800/30`}
                                 style={{ minWidth: `${(endMarker + 10) * 40}px` }}
-                                onDragOver={(e) => handleTrackDragOver(e, trackId)}
-                                onDrop={(e) => handleDrop(e, trackId, null)}
-                                onDragLeave={() => setDragOverTrackId(null)}
                             >
                                 {trackClips.map((clip, index) => {
                                     const isActive = currentTime >= clip.startTime && currentTime < (clip.startTime + clip.duration);
                                     const isSelected = selectedClipIds.includes(clip.id);
-                                    const isClipDragTarget = dragOverClipId === clip.id;
                                     const isAudio = clip.type === 'audio';
                                     const isText = clip.type === 'text';
 
@@ -224,14 +337,13 @@ export const Timeline: React.FC<TimelineProps> = ({
                                         icon = clip.type === 'image' ? <ImageIcon size={10} className="text-purple-300" /> : <Video size={10} className="text-blue-300" />;
                                     }
 
-                                    // Check for transition opportunity (only for video/image)
+                                    // Check for transition opportunity
                                     let transitionBtn = null;
                                     if (!isAudio && !isText && index < trackClips.length - 1) {
                                         const nextClip = trackClips[index + 1];
                                         if (nextClip.type !== 'audio' && nextClip.type !== 'text') {
                                             const clipEndTime = clip.startTime + clip.duration;
                                             const gap = nextClip.startTime - clipEndTime;
-                                            // Allow transition if gap is negligible (< 0.1s)
                                             if (gap < 0.1 && gap > -0.1) {
                                                 transitionBtn = (
                                                     <div 
@@ -241,14 +353,9 @@ export const Timeline: React.FC<TimelineProps> = ({
                                                         onMouseEnter={() => setHoveredGap({trackId, index})}
                                                         onMouseLeave={() => setHoveredGap(null)}
                                                     >
-                                                         {/* Visual Guide Line in gap */}
                                                          <div className="absolute inset-y-0 w-0.5 bg-purple-500/50 opacity-50 group-hover/trans:opacity-100" />
-                                                         
                                                          <button
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                if (onTransitionRequest) onTransitionRequest(clip, nextClip);
-                                                            }}
+                                                            onClick={(e) => { e.stopPropagation(); if (onTransitionRequest) onTransitionRequest(clip, nextClip); }}
                                                             className="relative w-6 h-6 rounded-full bg-purple-600 hover:bg-purple-500 text-white flex items-center justify-center shadow-lg transform scale-90 group-hover/trans:scale-110 transition-transform z-50 border border-purple-400"
                                                             title="Generate AI Transition with Veo"
                                                          >
@@ -263,18 +370,14 @@ export const Timeline: React.FC<TimelineProps> = ({
                                     return (
                                         <React.Fragment key={clip.id}>
                                             <div
-                                                draggable={true}
-                                                onDragStart={(e) => handleDragStart(e, clip.id)}
-                                                onDragOver={(e) => handleClipDragOver(e, clip.id)}
-                                                onDrop={(e) => handleDrop(e, trackId, clip.id)}
-                                                onDragLeave={() => setDragOverClipId(null)}
-                                                onClick={(e) => { e.stopPropagation(); onSelect(clip.id, e); }}
-                                                className={`group absolute top-1 bottom-1 rounded-md flex flex-col justify-between p-2 transition-all duration-200 ease-out border overflow-hidden cursor-grab active:cursor-grabbing ${bgClass} ${isSelected ? 'border-white ring-2 ring-white/50 z-20' : 'z-10'}`}
+                                                data-clip-body
+                                                onMouseDown={(e) => startMove(e, clip)}
+                                                className={`group absolute top-1 bottom-1 rounded-md flex flex-col justify-between p-2 transition-all duration-0 ease-linear border overflow-hidden cursor-grab active:cursor-grabbing ${bgClass} ${isSelected ? 'border-white ring-2 ring-white/50 z-20' : 'z-10'}`}
                                                 style={{ 
                                                     left: `${clip.startTime * 40}px`,
                                                     width: `${clip.duration * 40}px`,
-                                                    transition: dragState?.active ? 'none' : 'left 0.3s ease, width 0.1s ease',
-                                                    boxShadow: isClipDragTarget ? '-4px 0 0 0 #ffffff' : undefined
+                                                    boxShadow: dragState?.clipId === clip.id ? '0 4px 12px rgba(0,0,0,0.5)' : undefined,
+                                                    opacity: dragState?.clipId === clip.id ? 0.9 : 1
                                                 }}
                                             >
                                                 <div data-resize-handle className="absolute left-0 top-0 bottom-0 w-3 cursor-w-resize hover:bg-white/20 z-40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity" onMouseDown={(e) => startResize(e, clip, 'start')}><div className="w-0.5 h-6 bg-white/50 rounded-full" /></div>
@@ -286,12 +389,11 @@ export const Timeline: React.FC<TimelineProps> = ({
                                                 <span className={`text-[10px] pointer-events-none ${isActive || isSelected ? 'text-yellow-200' : 'text-white/50'}`}>{clip.duration.toFixed(1)}s</span>
                                                 <button onClick={(e) => { e.stopPropagation(); onDelete(clip.id); }} className="absolute top-1 right-1 p-0.5 rounded-full bg-black/40 hover:bg-red-500 text-white/70 hover:text-white opacity-0 group-hover:opacity-100 transition-all z-30"><X size={10} strokeWidth={3} /></button>
                                             </div>
-                                            {/* Render Transition Trigger Sibling */}
                                             {transitionBtn}
                                         </React.Fragment>
                                     );
                                 })}
-                                <button onClick={() => onAddMediaRequest(trackId)} className="group absolute h-20 w-20 border-2 border-dashed border-neutral-700/50 hover:border-blue-500/50 bg-neutral-800/10 hover:bg-blue-500/5 rounded-lg flex flex-col items-center justify-center cursor-pointer transition-all z-0 top-2 hover:scale-105 active:scale-95" style={{ left: `${(trackClips.reduce((max, c) => Math.max(max, c.startTime + c.duration), 0) * 40) + 20}px`, transition: dragState?.active ? 'none' : 'left 0.3s ease' }}>
+                                <button onClick={() => onAddMediaRequest(trackId)} className="group absolute h-20 w-20 border-2 border-dashed border-neutral-700/50 hover:border-blue-500/50 bg-neutral-800/10 hover:bg-blue-500/5 rounded-lg flex flex-col items-center justify-center cursor-pointer transition-all z-0 top-2 hover:scale-105 active:scale-95" style={{ left: `${(trackClips.reduce((max, c) => Math.max(max, c.startTime + c.duration), 0) * 40) + 20}px` }}>
                                     <div className="w-6 h-6 rounded-full bg-neutral-700 group-hover:bg-blue-500 flex items-center justify-center transition-colors"><Plus className="w-3 h-3 text-neutral-400 group-hover:text-white" strokeWidth={3} /></div>
                                     <span className="text-[9px] text-neutral-500 group-hover:text-blue-200 mt-1 font-medium">Add Media</span>
                                 </button>
