@@ -70,6 +70,7 @@ export default function App() {
   const clips = history.present;
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]); // Multi-select support
   const [hasAnalyzed, setHasAnalyzed] = useState(false);
+  const clipboardRef = useRef<Clip[]>([]); // Copy/Paste buffer
   
   // Menus
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
@@ -426,16 +427,14 @@ export default function App() {
       const newTracks = [...tracks, nextId].sort((a, b) => a - b);
       setTracks(newTracks);
   };
-  const handleDeleteClip = useCallback((id: string) => {
+  const handleDelete = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
     setHistory(curr => {
-        const clipToDelete = curr.present.find(c => c.id === id);
-        if (!clipToDelete) return curr;
-        const remainingClips = curr.present.filter(c => c.id !== id);
-        // Removed magnetic logic here. Just delete.
+        const remainingClips = curr.present.filter(c => !ids.includes(c.id));
         return { past: [...curr.past, curr.present], present: remainingClips, future: [] };
     });
-    if (selectedClipIds.includes(id)) setSelectedClipIds(prev => prev.filter(i => i !== id));
-  }, [selectedClipIds]);
+    setSelectedClipIds(prev => prev.filter(i => !ids.includes(i)));
+  }, []);
 
   const handleSelectClip = (id: string, e?: React.MouseEvent) => {
       if (e?.shiftKey) {
@@ -520,7 +519,8 @@ export default function App() {
      });
   };
 
-  // ... (Rest of component functions handleCanvasClick, handleGenerateCaptions, etc. remain unchanged) ...
+  const togglePlay = useCallback(() => setIsPlaying(p => !p), []);
+
   const handleCanvasClick = (e: React.MouseEvent) => {
       if (e.target === containerRef.current || e.target === e.currentTarget) {
           setSelectedClipIds([]); setShowSpeedMenu(false); setIsCustomSpeed(false); setShowVolumeMenu(false); setShowTextStyleMenu(false);
@@ -586,13 +586,103 @@ export default function App() {
   const handleAddMedia = async (event: React.ChangeEvent<HTMLInputElement>) => { const trackId = mediaModalTrackId; if (trackId === null || !event.target.files?.length) return; const files = Array.from(event.target.files) as File[]; const trackClips = clips.filter(c => c.trackId === trackId); let currentTrackEndTime = trackClips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0); const newClips: Clip[] = []; let firstVideoSet = false; for (const file of files) { const isImage = file.type.startsWith('image/'); const isVideo = file.type.startsWith('video/'); const isAudio = file.type.startsWith('audio/'); if (!isImage && !isVideo && !isAudio) continue; const url = URL.createObjectURL(file); const duration = await getMediaDuration(file); if (isVideo && !videoFile && !firstVideoSet) { setVideoFile(file); setVideoUrl(url); setHasAnalyzed(false); firstVideoSet = true; } newClips.push({ id: crypto.randomUUID(), title: file.name, startTime: currentTrackEndTime, sourceStartTime: 0, sourceUrl: url, trackId: trackId, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1, type: isImage ? 'image' : (isAudio ? 'audio' : 'video'), duration: duration, totalDuration: (isVideo || isAudio) ? duration : undefined }); currentTrackEndTime += duration; } if (newClips.length > 0) { setClipsWithHistory([...clips, ...newClips]); setMessages(prev => [...prev, { role: 'system', text: `Added ${newClips.length} items to Track ${trackId + 1}` }]); } setMediaModalTrackId(null); if (fileInputRef.current) fileInputRef.current.value = ''; };
   const getMediaDuration = (file: File): Promise<number> => { return new Promise((resolve) => { if (file.type.startsWith('image/')) { resolve(3); return; } const element = file.type.startsWith('audio/') ? document.createElement('audio') : document.createElement('video'); element.preload = 'metadata'; element.onloadedmetadata = () => { resolve(element.duration || 5); }; element.onerror = () => { resolve(5); }; element.src = URL.createObjectURL(file); }); };
   const formatTime = (seconds: number) => { const m = Math.floor(seconds / 60); const s = Math.floor(seconds % 60); const ms = Math.floor((seconds % 1) * 100); return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`; };
-  const togglePlay = () => setIsPlaying(!isPlaying);
-
+  
   const getVeoMode = () => { if (veoStartImg && veoEndImg) return { label: 'Interpolation', color: 'border-purple-500/50 text-purple-300 bg-purple-500/10' }; if (veoStartImg) return { label: 'Image-to-Video', color: 'border-blue-500/50 text-blue-300 bg-blue-500/10' }; return { label: 'Text-to-Video', color: 'border-neutral-700 text-neutral-400 bg-neutral-800' }; };
   const { label: veoModeLabel, color: veoModeColor } = getVeoMode();
 
   const handleSendMessage = async () => { if (!inputText.trim()) return; const userMessage: ChatMessage = { role: 'user', text: inputText }; setMessages(prev => [...prev, userMessage]); setInputText(''); setIsAnalyzing(true); try { if (videoFile && (inputText.toLowerCase().includes('analyze') || inputText.toLowerCase().includes('review'))) { setMessages(prev => [...prev, { role: 'system', text: "Analyzing video frames... (this uses Gemini 3 Pro Vision)" }]); const frames = await extractFramesFromVideo(videoFile, 10); const result = await analyzeVideoFrames(frames, inputText); setMessages(prev => [...prev, { role: 'model', text: result }]); } else if (inputText.toLowerCase().includes('suggest') || inputText.toLowerCase().includes('edit')) { setMessages(prev => [...prev, { role: 'system', text: "Reviewing timeline for edit suggestions..." }]); const suggestions = await suggestEdits(clips); const text = suggestions.map((s, i) => `**${i+1}. ${s.label}**\n${s.description}`).join('\n\n'); setMessages(prev => [...prev, { role: 'model', text: text }]); } else { const response = await chatWithGemini(messages, inputText); setMessages(prev => [...prev, { role: 'model', text: response }]); } } catch (error: any) { console.error(error); setMessages(prev => [...prev, { role: 'system', text: `Error: ${error.message}` }]); } finally { setIsAnalyzing(false); } };
   
+  // Hotkeys Effect
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+        if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName)) return;
+
+        // Space -> Play/Pause
+        if (e.code === 'Space') {
+            e.preventDefault();
+            togglePlay();
+        }
+
+        // Delete / Backspace
+        if (e.code === 'Delete' || e.code === 'Backspace') {
+            if (selectedClipIds.length > 0) {
+                e.preventDefault();
+                handleDelete(selectedClipIds);
+            }
+        }
+
+        // Escape -> Deselect
+        if (e.code === 'Escape') {
+            e.preventDefault();
+            setSelectedClipIds([]);
+        }
+
+        // Select All (Cmd+A)
+        if ((e.metaKey || e.ctrlKey) && e.code === 'KeyA') {
+            e.preventDefault();
+            setSelectedClipIds(clips.map(c => c.id));
+        }
+
+        // Copy (Cmd+C)
+        if ((e.metaKey || e.ctrlKey) && e.code === 'KeyC') {
+            e.preventDefault();
+            const toCopy = clips.filter(c => selectedClipIds.includes(c.id));
+            if (toCopy.length > 0) {
+                clipboardRef.current = toCopy;
+            }
+        }
+
+        // Paste (Cmd+V)
+        if ((e.metaKey || e.ctrlKey) && e.code === 'KeyV') {
+            e.preventDefault();
+            const toPaste = clipboardRef.current;
+            if (toPaste.length > 0) {
+                const earliestStart = Math.min(...toPaste.map(c => c.startTime));
+                const offset = currentTime - earliestStart;
+                
+                const newClips = toPaste.map(clip => ({
+                    ...clip,
+                    id: crypto.randomUUID(),
+                    startTime: Math.max(0, clip.startTime + offset),
+                    trackId: clip.trackId 
+                }));
+
+                setHistory(curr => ({
+                    past: [...curr.past, curr.present],
+                    present: [...curr.present, ...newClips],
+                    future: []
+                }));
+                setSelectedClipIds(newClips.map(c => c.id));
+            }
+        }
+
+        // Cut (Cmd+X)
+        if ((e.metaKey || e.ctrlKey) && e.code === 'KeyX') {
+            e.preventDefault();
+            const toCopy = clips.filter(c => selectedClipIds.includes(c.id));
+            if (toCopy.length > 0) {
+                clipboardRef.current = toCopy;
+                handleDelete(selectedClipIds);
+            }
+        }
+
+        // Undo (Cmd+Z)
+        if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ' && !e.shiftKey) {
+            e.preventDefault();
+            if (canUndo) handleUndo();
+        }
+
+        // Redo (Cmd+Shift+Z)
+        if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ' && e.shiftKey) {
+            e.preventDefault();
+            if (canRedo) handleRedo();
+        }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [clips, selectedClipIds, currentTime, isPlaying, canUndo, canRedo, handleDelete, handleUndo, handleRedo, togglePlay]);
+
   // Reused Controls for Caption Modal
   const TextControls = ({ values, onChange }: { values: any, onChange: (u: any) => void }) => (
       <div className="space-y-4">
@@ -795,7 +885,7 @@ export default function App() {
           <div className="h-64 border-t border-neutral-800 bg-neutral-900/50 backdrop-blur-sm z-10 flex flex-col">
             <Timeline 
                 clips={clips} tracks={tracks} currentTime={currentTime} 
-                onSeek={handleSeek} onDelete={handleDeleteClip} onSelect={handleSelectClip}
+                onSeek={handleSeek} onDelete={handleDelete} onSelect={handleSelectClip}
                 onAddMediaRequest={handleOpenMediaModal} onResize={handleClipResize}
                 onReorder={handleClipReorder} onAddTrack={handleAddTrack} selectedClipIds={selectedClipIds}
                 onTransitionRequest={handleTransitionRequest}

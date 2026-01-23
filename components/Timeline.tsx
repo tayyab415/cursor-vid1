@@ -7,7 +7,7 @@ interface TimelineProps {
   tracks: number[]; // Array of track IDs
   currentTime: number;
   onSeek: (time: number) => void;
-  onDelete: (id: string) => void;
+  onDelete: (ids: string[]) => void;
   onSelect: (id: string, e: React.MouseEvent) => void;
   onAddMediaRequest: (trackId: number) => void;
   onResize: (id: string, newDuration: number, mode: 'start' | 'end', commit: boolean) => void;
@@ -387,7 +387,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                                                     <span className={`text-xs font-medium truncate ${isActive || isSelected ? 'text-white' : isText ? 'text-emerald-100' : 'text-blue-100'}`}>{clip.title}</span>
                                                 </div>
                                                 <span className={`text-[10px] pointer-events-none ${isActive || isSelected ? 'text-yellow-200' : 'text-white/50'}`}>{clip.duration.toFixed(1)}s</span>
-                                                <button onClick={(e) => { e.stopPropagation(); onDelete(clip.id); }} className="absolute top-1 right-1 p-0.5 rounded-full bg-black/40 hover:bg-red-500 text-white/70 hover:text-white opacity-0 group-hover:opacity-100 transition-all z-30"><X size={10} strokeWidth={3} /></button>
+                                                <button onClick={(e) => { e.stopPropagation(); onDelete([clip.id]); }} className="absolute top-1 right-1 p-0.5 rounded-full bg-black/40 hover:bg-red-500 text-white/70 hover:text-white opacity-0 group-hover:opacity-100 transition-all z-30"><X size={10} strokeWidth={3} /></button>
                                             </div>
                                             {transitionBtn}
                                         </React.Fragment>
