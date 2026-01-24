@@ -154,6 +154,15 @@ export default function App() {
   const mediaRefs = useRef<{[key: string]: HTMLVideoElement | HTMLAudioElement | null}>({});
   const currentTimeRef = useRef(currentTime);
 
+  // --- DERIVED STATE ---
+  const selectedClips = clips.filter(c => selectedClipIds.includes(c.id));
+  const primarySelectedClip = selectedClips.length > 0 ? selectedClips[selectedClips.length - 1] : null;
+  const isMultiSelection = selectedClipIds.length > 1;
+  const allSelectedAreText = selectedClips.length > 0 && selectedClips.every(c => c.type === 'text');
+  const allSelectedAreMedia = selectedClips.length > 0 && selectedClips.every(c => ['video', 'audio', 'image'].includes(c.type || ''));
+  const isSelectedClipVisible = primarySelectedClip ? (currentTime >= primarySelectedClip.startTime && currentTime < primarySelectedClip.startTime + primarySelectedClip.duration) : false;
+  const availableVideo = clips.find(c => c.type === 'video');
+
   useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
@@ -164,6 +173,7 @@ export default function App() {
     if (isHighRes || hasRefImages) { if (vidDuration !== '8') setVidDuration('8'); }
   }, [vidResolution, veoStartImg, veoEndImg, vidDuration]);
 
+  // ... (Drawing and Player effects skipped for brevity - unchanged) ...
   // --- DRAWING HELPER ---
   const drawClipToCanvas = (ctx: CanvasRenderingContext2D, clip: Clip, source: CanvasImageSource, containerW: number, containerH: number) => {
       const transform = clip.transform || { x: 0, y: 0, scale: 1, rotation: 0 };
@@ -527,66 +537,158 @@ export default function App() {
       }
   };
 
-  const handleGenerateCaptions = async () => {
-      let targetFile: File | Blob | null = videoFile;
-      if (!targetFile) {
-          const videoClip = clips.find(c => c.type === 'video' && c.sourceUrl);
-          if (videoClip && videoClip.sourceUrl) {
-              try { const response = await fetch(videoClip.sourceUrl); targetFile = await response.blob(); } catch (e) { console.error(e); }
-          }
-      }
-      if (!targetFile) return;
-      setIsGenerating(true);
-      try {
-          const audioBase64 = await extractAudioFromVideo(targetFile);
-          const subtitles = await generateSubtitles(audioBase64);
-          if (!subtitles.length) { setMessages(prev => [...prev, { role: 'system', text: `⚠️ No subtitles were generated. Audio might be unclear.` }]); setIsGenerating(false); setCaptionModalOpen(false); return; }
-          const subtitleTrackId = tracks[tracks.length - 1] + 1;
-          if (!tracks.includes(subtitleTrackId)) setTracks(prev => [...prev, subtitleTrackId]);
-          const newClips = subtitles.map(sub => ({
-              id: crypto.randomUUID(),
-              title: sub.text,
-              startTime: sub.start,
-              sourceStartTime: 0,
-              type: 'text' as const,
-              text: sub.text,
-              textStyle: { ...captionStyle }, 
-              trackId: subtitleTrackId,
-              duration: sub.end - sub.start,
-              transform: { x: 0, y: 0.35, scale: 1, rotation: 0 },
-              speed: 1, volume: 1
-          }));
-          setClipsWithHistory([...clips, ...newClips]);
-          setMessages(prev => [...prev, { role: 'system', text: `✨ Generated ${newClips.length} subtitle segments` }]);
-          setCaptionModalOpen(false);
-      } catch (e: any) { console.error(e); setMessages(prev => [...prev, { role: 'system', text: `❌ Subtitle Error: ${e.message}` }]); } 
-      finally { setIsGenerating(false); }
-  };
-
-  const availableVideo = videoFile || clips.find(c => c.type === 'video');
-  const visibleClips = clips.filter(c => currentTime >= c.startTime && currentTime < c.startTime + c.duration).sort((a, b) => a.trackId - b.trackId); 
-  const selectedClips = clips.filter(c => selectedClipIds.includes(c.id));
-  const primarySelectedClip = selectedClips.length > 0 ? selectedClips[selectedClips.length - 1] : null;
-  const isSelectedClipVisible = primarySelectedClip && visibleClips.some(vc => vc.id === primarySelectedClip.id);
-  const isMultiSelection = selectedClipIds.length > 1;
-  const allSelectedAreText = selectedClips.length > 0 && selectedClips.every(c => c.type === 'text');
-  const allSelectedAreMedia = selectedClips.length > 0 && selectedClips.every(c => c.type === 'video' || c.type === 'audio');
-
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (file) { setVideoFile(file); const url = URL.createObjectURL(file); setVideoUrl(url); setMessages(prev => [...prev, { role: 'model', text: `Loaded **${file.name}**. Click "Analyze Video" to process it with **Gemini 3 Pro**.` }]); setCurrentTime(0); setIsPlaying(false); setHasAnalyzed(false); } };
-  const handleTransitionRequest = async (clipA: Clip, clipB: Clip) => { let startFrame = null; if (clipA.type === 'image' && clipA.sourceUrl) startFrame = clipA.sourceUrl; else if (clipA.type === 'video' && clipA.sourceUrl) { const endTime = clipA.sourceStartTime + (clipA.duration * (clipA.speed || 1)); try { startFrame = await captureFrameFromVideoUrl(clipA.sourceUrl, endTime); } catch (e) { console.error(e); } } let endFrame = null; if (clipB.type === 'image' && clipB.sourceUrl) endFrame = clipB.sourceUrl; else if (clipB.type === 'video' && clipB.sourceUrl) { const startTime = clipB.sourceStartTime; try { endFrame = await captureFrameFromVideoUrl(clipB.sourceUrl, startTime); } catch (e) { console.error(e); } } if (startFrame && endFrame) { setTransitionModal({ active: true, clipA, clipB, startFrame, endFrame, prompt: "Smooth cinematic transition between these two shots", model: 'veo-3.1-fast-generate-preview', resolution: '720p', duration: '8' }); } else { setMessages(prev => [...prev, { role: 'system', text: `❌ Could not extract frames for transition.` }]); } };
-  const handleGenerateTransition = async () => { if (!transitionModal.clipA || !transitionModal.clipB || !transitionModal.startFrame || !transitionModal.endFrame) return; setIsGenerating(true); try { const videoUrl = await generateVideo(transitionModal.prompt, transitionModal.model, '16:9', transitionModal.resolution, 8, transitionModal.startFrame, transitionModal.endFrame); const tempVideo = document.createElement('video'); tempVideo.src = videoUrl; await new Promise(r => { tempVideo.onloadedmetadata = r; tempVideo.onerror = r; }); const duration = tempVideo.duration || 8; const transitionClip: Clip = { id: crypto.randomUUID(), title: `Transition`, startTime: transitionModal.clipA.startTime + transitionModal.clipA.duration, sourceStartTime: 0, type: 'video', sourceUrl: videoUrl, trackId: transitionModal.clipA.trackId, duration: duration, totalDuration: duration, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1 }; const currentClips = clips; const trackId = transitionModal.clipA.trackId; const insertionTime = transitionClip.startTime; const trackClips = currentClips.filter(c => c.trackId === trackId); const laterClips = trackClips.filter(c => c.startTime >= insertionTime); const shiftedLaterClips = laterClips.map(c => ({ ...c, startTime: c.startTime + duration })); const otherTracks = currentClips.filter(c => c.trackId !== trackId); const earlierClips = trackClips.filter(c => c.startTime < insertionTime); const finalClips = [...otherTracks, ...earlierClips, transitionClip, ...shiftedLaterClips]; setClipsWithHistory(finalClips); setMessages(prev => [...prev, { role: 'system', text: `✨ Generated transition between "${transitionModal.clipA?.title}" and "${transitionModal.clipB?.title}"` }]); setTransitionModal(prev => ({ ...prev, active: false })); } catch (e: any) { console.error(e); setMessages(prev => [...prev, { role: 'system', text: `❌ Transition Error: ${e.message}` }]); } finally { setIsGenerating(false); } };
   const handleOpenMediaModal = (trackId: number) => { setMediaModalTrackId(trackId); setModalMode('initial'); setGenTab('image'); setGenPrompt(''); setVeoStartImg(null); setVeoEndImg(null); };
   const handleCloseMediaModal = () => { setMediaModalTrackId(null); setIsGenerating(false); };
   const triggerLocalUpload = () => { if (fileInputRef.current) fileInputRef.current.click(); };
   const handleVeoReferenceUpload = (target: 'start' | 'end') => { if (referenceImageInputRef.current) { referenceImageInputRef.current.setAttribute('data-target', target); referenceImageInputRef.current.click(); } };
   const handleReferenceImageFileChange = (e: React.ChangeEvent<HTMLInputElement>) => { const file = e.target.files?.[0]; const target = e.target.getAttribute('data-target'); if (file && target) { const reader = new FileReader(); reader.onload = (ev) => { if (ev.target?.result) { if (target === 'start') setVeoStartImg(ev.target.result as string); else if (target === 'end') setVeoEndImg(ev.target.result as string); } }; reader.readAsDataURL(file); } e.target.value = ''; };
   const handleCaptureFrame = async (target: 'start' | 'end') => { const base64 = await captureCurrentFrame(); if (base64) { if (target === 'start') setVeoStartImg(base64); else setVeoEndImg(base64); } else { alert("Could not capture frame. Ensure content is visible."); } };
+  
   const handleGenerate = async () => { if ((genTab !== 'video' && !genPrompt.trim()) || mediaModalTrackId === null) return; if (genTab === 'video' && !genPrompt.trim() && !veoStartImg) return; setIsGenerating(true); try { const trackId = mediaModalTrackId; const trackClips = clips.filter(c => c.trackId === trackId); const trackEndTime = trackClips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0); let newClip: Clip; if (genTab === 'image') { const base64Image = await generateImage(genPrompt, imgModel, imgAspect); newClip = { id: crypto.randomUUID(), title: `Img: ${genPrompt.slice(0, 10)}...`, startTime: trackEndTime, sourceStartTime: 0, type: 'image', sourceUrl: base64Image, trackId: trackId, duration: 3, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1 }; } else if (genTab === 'video') { const videoUrl = await generateVideo(genPrompt, vidModel, vidAspect, vidResolution, parseInt(vidDuration), veoStartImg, veoEndImg); const tempVideo = document.createElement('video'); tempVideo.src = videoUrl; await new Promise(r => { tempVideo.onloadedmetadata = r; tempVideo.onerror = r; }); newClip = { id: crypto.randomUUID(), title: `Veo: ${genPrompt ? genPrompt.slice(0, 10) : 'Img2Vid'}...`, startTime: trackEndTime, sourceStartTime: 0, type: 'video', sourceUrl: videoUrl, trackId: trackId, duration: tempVideo.duration || 5, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1 }; } else { const wavUrl = await generateSpeech(genPrompt, audioVoice); const tempAudio = document.createElement('audio'); tempAudio.src = wavUrl; await new Promise(r => { tempAudio.onloadedmetadata = r; tempAudio.onerror = r; }); newClip = { id: crypto.randomUUID(), title: `TTS: ${genPrompt.slice(0, 10)}...`, startTime: trackEndTime, sourceStartTime: 0, type: 'audio', sourceUrl: wavUrl, trackId: trackId, duration: tempAudio.duration || 3, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1 }; } setClipsWithHistory([...clips, newClip]); setMessages(prev => [...prev, { role: 'system', text: `✨ Generated ${genTab} for Track ${trackId + 1}` }]); setMediaModalTrackId(null); } catch (e: any) { console.error(e); setMessages(prev => [...prev, { role: 'system', text: `❌ Generation Error: ${e.message}` }]); } finally { setIsGenerating(false); } };
+  
   const handleSeek = (time: number) => { const newTime = Math.max(0, time); setCurrentTime(newTime); const visibleClips = clips.filter(c => newTime >= c.startTime && newTime < c.startTime + c.duration); visibleClips.forEach(clip => { if ((clip.type === 'video' || clip.type === 'audio') && mediaRefs.current[clip.id]) { const el = mediaRefs.current[clip.id]; if (el) { const speed = clip.speed || 1; const offsetInClip = newTime - clip.startTime; el.currentTime = clip.sourceStartTime + (offsetInClip * speed); } } }); };
   const handleAddMedia = async (event: React.ChangeEvent<HTMLInputElement>) => { const trackId = mediaModalTrackId; if (trackId === null || !event.target.files?.length) return; const files = Array.from(event.target.files) as File[]; const trackClips = clips.filter(c => c.trackId === trackId); let currentTrackEndTime = trackClips.reduce((acc, c) => Math.max(acc, c.startTime + c.duration), 0); const newClips: Clip[] = []; let firstVideoSet = false; for (const file of files) { const isImage = file.type.startsWith('image/'); const isVideo = file.type.startsWith('video/'); const isAudio = file.type.startsWith('audio/'); if (!isImage && !isVideo && !isAudio) continue; const url = URL.createObjectURL(file); const duration = await getMediaDuration(file); if (isVideo && !videoFile && !firstVideoSet) { setVideoFile(file); setVideoUrl(url); setHasAnalyzed(false); firstVideoSet = true; } newClips.push({ id: crypto.randomUUID(), title: file.name, startTime: currentTrackEndTime, sourceStartTime: 0, sourceUrl: url, trackId: trackId, transform: { x: 0, y: 0, scale: 1, rotation: 0 }, speed: 1, volume: 1, type: isImage ? 'image' : (isAudio ? 'audio' : 'video'), duration: duration, totalDuration: (isVideo || isAudio) ? duration : undefined }); currentTrackEndTime += duration; } if (newClips.length > 0) { setClipsWithHistory([...clips, ...newClips]); setMessages(prev => [...prev, { role: 'system', text: `Added ${newClips.length} items to Track ${trackId + 1}` }]); } setMediaModalTrackId(null); if (fileInputRef.current) fileInputRef.current.value = ''; };
   const getMediaDuration = (file: File): Promise<number> => { return new Promise((resolve) => { if (file.type.startsWith('image/')) { resolve(3); return; } const element = file.type.startsWith('audio/') ? document.createElement('audio') : document.createElement('video'); element.preload = 'metadata'; element.onloadedmetadata = () => { resolve(element.duration || 5); }; element.onerror = () => { resolve(5); }; element.src = URL.createObjectURL(file); }); };
   const formatTime = (seconds: number) => { const m = Math.floor(seconds / 60); const s = Math.floor(seconds % 60); const ms = Math.floor((seconds % 1) * 100); return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`; };
   
+  // New handlers
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+      if (!event.target.files?.length) return;
+      const file = event.target.files[0];
+      const url = URL.createObjectURL(file);
+      const duration = await getMediaDuration(file);
+      
+      const isVideo = file.type.startsWith('video/');
+      if (isVideo && !videoFile) {
+          setVideoFile(file);
+          setVideoUrl(url);
+      }
+      
+      const trackId = 0;
+      const trackClips = clips.filter(c => c.trackId === trackId);
+      const startTime = trackClips.reduce((max, c) => Math.max(max, c.startTime + c.duration), 0);
+
+      const newClip: Clip = {
+          id: crypto.randomUUID(),
+          title: file.name,
+          startTime,
+          sourceStartTime: 0,
+          type: isVideo ? 'video' : (file.type.startsWith('audio/') ? 'audio' : 'image'),
+          sourceUrl: url,
+          trackId,
+          duration: duration,
+          totalDuration: isVideo || file.type.startsWith('audio/') ? duration : undefined,
+          transform: { x: 0, y: 0, scale: 1, rotation: 0 },
+          speed: 1, 
+          volume: 1
+      };
+      
+      setClipsWithHistory([...clips, newClip]);
+      setMessages(prev => [...prev, { role: 'system', text: `Imported ${file.name}` }]);
+      event.target.value = '';
+  };
+
+  const handleGenerateCaptions = async () => {
+    setIsGenerating(true);
+    try {
+        let audioBase64: string;
+        if (videoFile) {
+            audioBase64 = await extractAudioFromVideo(videoFile);
+        } else if (availableVideo && availableVideo.sourceUrl) {
+            const res = await fetch(availableVideo.sourceUrl);
+            const blob = await res.blob();
+            audioBase64 = await extractAudioFromVideo(blob);
+        } else {
+            throw new Error("No video available for caption generation.");
+        }
+
+        const subtitles = await generateSubtitles(audioBase64);
+        const newClips: Clip[] = subtitles.map(sub => ({
+          id: crypto.randomUUID(),
+          title: sub.text,
+          startTime: sub.start + (availableVideo && !videoFile ? availableVideo.startTime : 0),
+          duration: sub.end - sub.start,
+          sourceStartTime: 0,
+          type: 'text',
+          text: sub.text,
+          trackId: 3,
+          transform: { x: 0, y: 0.4, scale: 1, rotation: 0 },
+          textStyle: captionStyle,
+          speed: 1, volume: 1
+        }));
+        
+        setClipsWithHistory([...clips, ...newClips]);
+        setMessages(prev => [...prev, { role: 'system', text: `Generated ${newClips.length} captions.` }]);
+        setCaptionModalOpen(false);
+
+    } catch (e: any) {
+        console.error(e);
+        setMessages(prev => [...prev, { role: 'system', text: `Caption Error: ${e.message}` }]);
+    } finally {
+        setIsGenerating(false);
+    }
+  };
+
+  const handleTransitionRequest = async (clipA: Clip, clipB: Clip) => {
+    try {
+        let startFrame = null;
+        let endFrame = null;
+        if (clipA.sourceUrl) {
+            if (clipA.type === 'video') endFrame = await captureFrameFromVideoUrl(clipA.sourceUrl, clipA.sourceStartTime + clipA.duration);
+            else if (clipA.type === 'image') endFrame = clipA.sourceUrl;
+        }
+        if (clipB.sourceUrl) {
+            if (clipB.type === 'video') startFrame = await captureFrameFromVideoUrl(clipB.sourceUrl, clipB.sourceStartTime);
+            else if (clipB.type === 'image') startFrame = clipB.sourceUrl;
+        }
+
+        setTransitionModal({
+            active: true, clipA, clipB,
+            startFrame: endFrame,
+            endFrame: startFrame,
+            prompt: "Cinematic smooth transition",
+            model: 'veo-3.1-fast-generate-preview',
+            resolution: '720p',
+            duration: '4'
+        });
+    } catch (e) {
+        console.error(e);
+        alert("Could not prepare transition.");
+    }
+  };
+
+  const handleGenerateTransition = async () => {
+      if (!transitionModal.clipA || !transitionModal.clipB) return;
+      setIsGenerating(true);
+      try {
+          const videoUrl = await generateVideo(
+              transitionModal.prompt, transitionModal.model, '16:9',
+              transitionModal.resolution, parseInt(transitionModal.duration),
+              transitionModal.startFrame, transitionModal.endFrame
+          );
+          
+          const duration = parseInt(transitionModal.duration);
+          const startTime = transitionModal.clipB.startTime - (duration / 2);
+          
+          const newClip: Clip = {
+              id: crypto.randomUUID(), title: 'Veo Transition',
+              startTime: startTime, sourceStartTime: 0, type: 'video',
+              sourceUrl: videoUrl, trackId: Math.max(transitionModal.clipA.trackId, transitionModal.clipB.trackId) + 1,
+              duration: duration, totalDuration: duration,
+              transform: { x: 0, y: 0, scale: 1, rotation: 0 },
+              speed: 1, volume: 1
+          };
+          
+          setClipsWithHistory([...clips, newClip]);
+          setTransitionModal(prev => ({ ...prev, active: false }));
+      } catch (e: any) {
+          console.error(e);
+          setMessages(prev => [...prev, { role: 'system', text: `Transition Error: ${e.message}` }]);
+      } finally {
+          setIsGenerating(false);
+      }
+  };
+
   const getVeoMode = () => { if (veoStartImg && veoEndImg) return { label: 'Interpolation', color: 'border-purple-500/50 text-purple-300 bg-purple-500/10' }; if (veoStartImg) return { label: 'Image-to-Video', color: 'border-blue-500/50 text-blue-300 bg-blue-500/10' }; return { label: 'Text-to-Video', color: 'border-neutral-700 text-neutral-400 bg-neutral-800' }; };
   const { label: veoModeLabel, color: veoModeColor } = getVeoMode();
 
@@ -865,7 +967,7 @@ export default function App() {
                            <>
                            {/* Speed Control */}
                            <div className="relative">
-                               <button onClick={() => { setShowSpeedMenu(!showSpeedMenu); setShowVolumeMenu(false); setIsCustomSpeed(false); setShowTextStyleMenu(false); }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${showSpeedMenu ? 'bg-blue-600 text-white' : 'bg-neutral-800 text-neutral-300 hover:text-white hover:bg-neutral-700'}`}><Gauge className="w-3.5 h-3.5" />{primarySelectedClip?.speed}x</button>
+                                <button onClick={() => { setShowSpeedMenu(!showSpeedMenu); setShowVolumeMenu(false); setIsCustomSpeed(false); setShowTextStyleMenu(false); }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${showSpeedMenu ? 'bg-blue-600 text-white' : 'bg-neutral-800 text-neutral-300 hover:text-white hover:bg-neutral-700'}`}><Gauge className="w-3.5 h-3.5" />{primarySelectedClip?.speed}x</button>
                                {showSpeedMenu && (<div className="absolute bottom-full mb-2 right-0 bg-neutral-800 border border-neutral-700 rounded-lg shadow-xl overflow-hidden min-w-[140px] flex flex-col p-1 z-50">{[0.5, 1, 1.5, 2].map(s => (<button key={s} onClick={() => primarySelectedClip && handleClipSpeed(primarySelectedClip.id, s)} className="text-left px-3 py-1.5 text-xs rounded hover:bg-neutral-700 transition-colors w-full text-neutral-300">{s}x</button>))}</div>)}
                            </div>
                            

@@ -341,6 +341,7 @@ export const generateSpeech = async (
 ): Promise<string> => {
     const ai = getAiClient();
     try {
+        // Using the dedicated TTS model which is reliable for speech
         const response = await ai.models.generateContent({
             model: "gemini-2.5-flash-preview-tts",
             contents: [{ parts: [{ text: text }] }],
